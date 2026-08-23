@@ -1,0 +1,11 @@
+interface:
+  display_name: "MT5 Reports and History"
+  short_description: "Raporları bulur, karşılaştırır ve arşivler"
+  default_prompt: "Use $mt5-mcp-quant-reports to find and compare my latest MT5-MCP-Quant reports."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "mt5_mcp_quant"
+      description: "Native Windows MT5-MCP-Quant MCP server"
+policy:
+  allow_implicit_invocation: true

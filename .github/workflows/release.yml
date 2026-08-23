@@ -1,0 +1,195 @@
+name: Build and Release (Windows)
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version tag (for example v1.35.0)
+        required: true
+        type: string
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: windows-cargo-
+
+      - name: Test
+        run: cargo test --all-targets --verbose
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Package native Windows MCP server
+        shell: pwsh
+        run: |
+          $package = 'dist/mcp-mt5-mcp-quant-windows'
+          New-Item -ItemType Directory -Force -Path $package | Out-Null
+          Copy-Item target/release/mt5-mcp-quant.exe $package/
+          Copy-Item config $package/config -Recurse
+          Copy-Item docs $package/docs -Recurse
+          New-Item -ItemType Directory -Force -Path $package/scripts | Out-Null
+          Copy-Item scripts/setup.ps1,scripts/build-windows.ps1 $package/scripts/
+          Copy-Item README.md,server.json $package/
+          tar -czf dist/mcp-mt5-mcp-quant-windows-x64.tar.gz -C dist mcp-mt5-mcp-quant-windows
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-binary
+          path: dist/mcp-mt5-mcp-quant-windows-x64.tar.gz
+
+  cargo-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish crate
+        run: cargo publish --no-verify --allow-dirty
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  release:
+    needs: [build-windows, cargo-publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.event.inputs.version || github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-binary
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_TAG }}
+          files: dist/mcp-mt5-mcp-quant-windows-x64.tar.gz
+          generate_release_notes: true
+
+  update-server-manifest:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.event.inputs.version || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-binary
+          path: dist
+      - name: Update version, URL, and SHA256
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          SHA256="$(sha256sum dist/mcp-mt5-mcp-quant-windows-x64.tar.gz | awk '{print $1}')"
+          VERSION="$VERSION" SHA256="$SHA256" python3 - <<'PY'
+          import json, os
+
+          with open('server.json', encoding='utf-8') as f:
+              data = json.load(f)
+          version = os.environ['VERSION']
+          sha = os.environ['SHA256']
+          data['version'] = version
+          for package in data.get('packages', []):
+              package['version'] = version
+              package['fileSha256'] = sha
+              package['identifier'] = (
+                  f'https://github.com/severus-sys/mt5-mcp-quant/releases/download/'
+                  f'v{version}/mcp-mt5-mcp-quant-windows-x64.tar.gz'
+              )
+          with open('server.json', 'w', encoding='utf-8') as f:
+              json.dump(data, f, indent=2)
+              f.write('\n')
+          PY
+      - name: Commit manifest
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add server.json
+          git diff --cached --quiet || git commit -m "ci: update Windows package manifest for ${RELEASE_TAG} [skip ci]"
+          git push origin main
+
+  mcp-publish:
+    needs: update-server-manifest
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Install MCP Registry publisher
+        run: |
+          URL=$(curl -sf \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/modelcontextprotocol/registry/releases/latest" \
+            | python3 -c "
+          import json, sys
+          release = json.load(sys.stdin)
+          asset = next((item for item in release.get('assets', [])
+                        if 'linux' in item['name'] and 'amd64' in item['name']
+                        and item['name'].endswith('.tar.gz')
+                        and 'sbom' not in item['name']
+                        and 'sigstore' not in item['name']), None)
+          if not asset:
+              sys.exit(1)
+          print(asset['browser_download_url'])
+          ")
+          curl -fsSL -o mcp-publisher.tar.gz "$URL"
+          tar -xzf mcp-publisher.tar.gz
+          BINARY=$(find . -maxdepth 3 -name mcp-publisher -type f | head -1)
+          test -n "$BINARY"
+          chmod +x "$BINARY"
+          sudo mv "$BINARY" /usr/local/bin/mcp-publisher
+          mcp-publisher --version
+
+      - name: Validate Windows package manifest
+        run: |
+          python3 - <<'PY'
+          import json, re
+
+          with open('server.json', encoding='utf-8') as f:
+              data = json.load(f)
+          packages = data.get('packages', [])
+          assert packages, 'server.json has no packages'
+          for package in packages:
+              assert re.fullmatch(r'[a-f0-9]{64}', package.get('fileSha256', ''))
+              assert 'windows-x64.tar.gz' in package.get('identifier', '')
+          PY
+
+      - name: Publish to MCP Registry
+        run: |
+          mcp-publisher login github-oidc
+          mcp-publisher publish
+
+  release-info:
+    needs: mcp-publish
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event.inputs.version || github.ref_name }}
+    steps:
+      - name: Summary
+        run: |
+          echo "Windows release ${RELEASE_TAG} completed"
+          echo "Artifact: mcp-mt5-mcp-quant-windows-x64.tar.gz"
+          echo "MCP Registry: io.github.severus-sys/mt5-mcp-quant"

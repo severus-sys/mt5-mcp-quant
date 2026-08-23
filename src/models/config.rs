@@ -1,0 +1,968 @@
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+/// Active MT5 account session info
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CurrentAccount {
+    pub login: String,
+    pub server: String,
+}
+
+impl CurrentAccount {
+    /// Parse common.ini to extract active account info
+    /// Handles UTF-16LE encoding which MT5 uses on Windows/Wine
+    pub fn from_common_ini(terminal_dir: &Path) -> Option<Self> {
+        let common_ini = terminal_dir.join("config").join("common.ini");
+        if !common_ini.exists() {
+            return None;
+        }
+
+        // Try reading as UTF-16LE first (MT5 default encoding)
+        let bytes = fs::read(&common_ini).ok()?;
+        let content = if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
+            // UTF-16LE BOM detected
+            let start = if bytes.len() >= 2 { 2 } else { 0 };
+            let u16_slice: Vec<u16> = bytes[start..]
+                .chunks(2)
+                .map(|chunk| {
+                    if chunk.len() == 2 {
+                        u16::from_le_bytes([chunk[0], chunk[1]])
+                    } else {
+                        chunk[0] as u16
+                    }
+                })
+                .collect();
+            String::from_utf16(&u16_slice).ok()?
+        } else {
+            // Try UTF-8 fallback
+            String::from_utf8(bytes).ok()?
+        };
+
+        let mut login = None;
+        let mut server = None;
+
+        for line in content.lines() {
+            // Remove null bytes and control characters but keep printable ASCII and valid Unicode
+            let cleaned: String = line
+                .chars()
+                .filter(|c| *c != '\0' && !c.is_control())
+                .collect();
+
+            let trimmed = cleaned.trim();
+            if trimmed.starts_with("Login=") {
+                let val = trimmed.strip_prefix("Login=").map(|s| s.trim().to_string());
+                if let Some(v) = val {
+                    if !v.is_empty() {
+                        login = Some(v);
+                    }
+                }
+            } else if trimmed.starts_with("Server=") {
+                let val = trimmed
+                    .strip_prefix("Server=")
+                    .map(|s| s.trim().to_string());
+                if let Some(v) = val {
+                    if !v.is_empty() {
+                        server = Some(v);
+                    }
+                }
+            }
+        }
+
+        match (login, server) {
+            (Some(l), Some(s)) => Some(Self {
+                login: l,
+                server: s,
+            }),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Config {
+    pub wine_executable: Option<String>,
+    /// Directory containing terminal64.exe and metaeditor64.exe.
+    pub terminal_dir: Option<String>,
+    /// MT5 user data directory containing MQL5/, Tester/, Bases/, and config/.
+    /// On Wine/portable installs this is usually the same as terminal_dir. On a
+    /// normal Windows install it lives under %APPDATA%\MetaQuotes\Terminal.
+    pub data_dir: Option<String>,
+    pub experts_dir: Option<String>,
+    pub indicators_dir: Option<String>,
+    pub scripts_dir: Option<String>,
+    pub tester_profiles_dir: Option<String>,
+    pub tester_cache_dir: Option<String>,
+    pub display_mode: Option<String>,
+    pub backtest_symbol: Option<String>,
+    pub backtest_deposit: Option<u32>,
+    pub backtest_currency: Option<String>,
+    pub backtest_leverage: Option<u32>,
+    pub backtest_model: Option<u32>,
+    pub backtest_timeframe: Option<String>,
+    pub backtest_timeout: Option<u32>,
+    pub opt_log_dir: Option<String>,
+    pub opt_min_agents: Option<u32>,
+    pub opt_max_agents: Option<u32>,
+    pub reports_dir: Option<String>,
+    pub backtest_login: Option<String>,
+    pub backtest_server: Option<String>,
+    pub backtest_password: Option<String>,
+    pub project_dir: Option<String>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            wine_executable: None,
+            terminal_dir: None,
+            data_dir: None,
+            experts_dir: None,
+            indicators_dir: None,
+            scripts_dir: None,
+            tester_profiles_dir: None,
+            tester_cache_dir: None,
+            display_mode: None,
+            backtest_symbol: None,
+            backtest_deposit: None,
+            backtest_currency: None,
+            backtest_leverage: None,
+            backtest_model: None,
+            backtest_timeframe: None,
+            backtest_timeout: None,
+            opt_log_dir: None,
+            opt_min_agents: None,
+            opt_max_agents: None,
+            reports_dir: None,
+            backtest_login: None,
+            backtest_server: None,
+            backtest_password: None,
+            project_dir: None,
+        }
+    }
+}
+
+impl Config {
+    pub fn load() -> Result<Self> {
+        let config_path = Self::writable_config_path();
+
+        if config_path.exists() {
+            return Self::parse_file(&config_path);
+        }
+
+        // No config found — auto-discover and persist.
+        let discovered = Self::auto_discover();
+        if let Err(e) = discovered.save() {
+            tracing::warn!("Could not save auto-discovered config: {}", e);
+        }
+        Ok(discovered)
+    }
+
+    /// The canonical writable config location, checked in order:
+    /// 1. $MT5_MCP_QUANT_HOME/config/mt5-mcp-quant.yaml (user override)
+    /// 2. Config next to binary (for portable/development installs)
+    /// 3. ~/.config/mt5-mcp-quant/config/mt5-mcp-quant.yaml (standard location)
+    /// 4. Development fallback (project directory)
+    pub fn writable_config_path() -> PathBuf {
+        // 1. Check env override first
+        if let Ok(home) = std::env::var("MT5_MCP_QUANT_HOME") {
+            return Path::new(&home).join("config").join("mt5-mcp-quant.yaml");
+        }
+
+        // Development builds use the repository-local config directory.
+        if cfg!(debug_assertions) {
+            return Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("config")
+                .join("mt5-mcp-quant.yaml");
+        }
+
+        // 2. Check if config exists next to the binary. Packaged releases ship
+        // a config/ directory beside mt5-mcp-quant.exe.
+        if let Some(binary_dir) = Self::binary_dir() {
+            let local_config = binary_dir.join("config").join("mt5-mcp-quant.yaml");
+            if local_config.exists() {
+                return local_config;
+            }
+        }
+
+        // 3. A locally built release binary should reuse the repository config
+        // generated by scripts/setup.ps1 instead of writing under target/release.
+        let manifest_config = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("config")
+            .join("mt5-mcp-quant.yaml");
+        if manifest_config.exists() {
+            return manifest_config;
+        }
+
+        // 4. Check standard location
+        let standard_config = Self::standard_config_dir()
+            .join("config")
+            .join("mt5-mcp-quant.yaml");
+        if standard_config.exists() {
+            return standard_config;
+        }
+
+        // 5. Fall back to standard location (created on first run)
+        Self::standard_config_dir()
+            .join("config")
+            .join("mt5-mcp-quant.yaml")
+    }
+
+    // ── Auto-discovery ────────────────────────────────────────────────────────
+
+    pub fn auto_discover() -> Self {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let mut cfg = Config::default();
+
+        // 1. Find runtime and MT5 installation ------------------------------
+        if Self::requires_wine() {
+            cfg.wine_executable = Self::find_wine(&home);
+        }
+        let terminal_dir = Self::find_mt5_install_dir(&home);
+        let data_dir = Self::find_mt5_data_dir(&home, terminal_dir.as_deref());
+
+        // 2. Derive all data directories from MT5's data root. On native
+        // Windows this is normally separate from the executable directory.
+        if let Some(mt5_dir) = data_dir.as_ref() {
+            cfg.experts_dir = Some(
+                mt5_dir
+                    .join("MQL5")
+                    .join("Experts")
+                    .to_string_lossy()
+                    .to_string(),
+            );
+            cfg.indicators_dir = Some(
+                mt5_dir
+                    .join("MQL5")
+                    .join("Indicators")
+                    .to_string_lossy()
+                    .to_string(),
+            );
+            cfg.scripts_dir = Some(
+                mt5_dir
+                    .join("MQL5")
+                    .join("Scripts")
+                    .to_string_lossy()
+                    .to_string(),
+            );
+            cfg.tester_profiles_dir = Some(
+                mt5_dir
+                    .join("MQL5")
+                    .join("Profiles")
+                    .join("Tester")
+                    .to_string_lossy()
+                    .to_string(),
+            );
+            cfg.tester_cache_dir = Some(mt5_dir.join("Tester").to_string_lossy().to_string());
+            cfg.data_dir = Some(mt5_dir.to_string_lossy().to_string());
+        }
+        cfg.terminal_dir = terminal_dir.map(|p| p.to_string_lossy().to_string());
+
+        // 3. Display mode ---------------------------------------------------
+        cfg.display_mode = Some(Self::detect_display_mode());
+
+        // 4. Sensible backtest defaults ------------------------------------
+        cfg.backtest_symbol = Some("XAUUSD".into());
+        cfg.backtest_deposit = Some(10000);
+        cfg.backtest_currency = Some("USD".into());
+        cfg.backtest_leverage = Some(500);
+        cfg.backtest_model = Some(0);
+        cfg.backtest_timeframe = Some("M5".into());
+        cfg.backtest_timeout = Some(900);
+        cfg.opt_log_dir = Some(
+            std::env::temp_dir()
+                .join("mt5-mcp-quant")
+                .join("logs")
+                .to_string_lossy()
+                .to_string(),
+        );
+        cfg.opt_min_agents = Some(1);
+        cfg.opt_max_agents = Some(20);
+
+        cfg
+    }
+
+    fn find_wine(home: &Path) -> Option<String> {
+        let candidates: &[PathBuf] = &[
+            // macOS: bundled with the official MT5 app (binary is just named 'wine' on recent builds)
+            PathBuf::from("/Applications/MetaTrader 5.app/Contents/SharedSupport/wine/bin/wine"),
+            PathBuf::from("/Applications/MetaTrader 5.app/Contents/SharedSupport/wine/bin/wine64"),
+            // macOS: CrossOver (new versions may use 'wine', older ones 'wine64')
+            home.join("Applications/CrossOver.app/Contents/SharedSupport/CrossOver/wine/bin/wine"),
+            home.join(
+                "Applications/CrossOver.app/Contents/SharedSupport/CrossOver/wine/bin/wine64",
+            ),
+            // macOS: Homebrew Apple Silicon (prefer 'wine', fall back to 'wine64')
+            PathBuf::from("/opt/homebrew/bin/wine"),
+            PathBuf::from("/opt/homebrew/bin/wine64"),
+            // macOS: Homebrew Intel
+            PathBuf::from("/usr/local/bin/wine"),
+            PathBuf::from("/usr/local/bin/wine64"),
+            // Linux
+            PathBuf::from("/usr/bin/wine"),
+            PathBuf::from("/usr/bin/wine64"),
+        ];
+        candidates
+            .iter()
+            .find(|p| p.exists())
+            .map(|p| p.to_string_lossy().to_string())
+    }
+
+    fn find_mt5_install_dir(_home: &Path) -> Option<PathBuf> {
+        #[cfg(target_os = "windows")]
+        {
+            let mut roots = Vec::new();
+            for key in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"] {
+                if let Ok(value) = std::env::var(key) {
+                    roots.push(PathBuf::from(value));
+                }
+            }
+
+            let mut candidates = Vec::new();
+            for root in roots {
+                candidates.push(root.join("MetaTrader 5"));
+                if let Ok(entries) = fs::read_dir(&root) {
+                    for entry in entries.filter_map(|entry| entry.ok()) {
+                        if entry.path().is_dir() {
+                            candidates.push(entry.path());
+                        }
+                    }
+                }
+            }
+
+            return candidates
+                .into_iter()
+                .find(|dir| dir.join("terminal64.exe").is_file());
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            Self::find_mt5_dir(_home)
+        }
+    }
+
+    fn find_mt5_data_dir(home: &Path, terminal_dir: Option<&Path>) -> Option<PathBuf> {
+        #[cfg(target_os = "windows")]
+        {
+            // Portable installs keep their data beside terminal64.exe.
+            if let Some(terminal) = terminal_dir {
+                if terminal.join("MQL5").is_dir() {
+                    return Some(terminal.to_path_buf());
+                }
+            }
+
+            let app_data = std::env::var("APPDATA")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| home.join("AppData").join("Roaming"));
+            let instances_root = app_data.join("MetaQuotes").join("Terminal");
+            let entries = fs::read_dir(&instances_root).ok()?;
+            let terminal_norm =
+                terminal_dir.map(|path| path.to_string_lossy().replace('/', "\\").to_lowercase());
+
+            let mut fallback: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+            for entry in entries.filter_map(|entry| entry.ok()) {
+                let path = entry.path();
+                if !path.join("MQL5").is_dir() {
+                    continue;
+                }
+
+                // origin.txt links a data instance to its executable directory.
+                if let (Some(expected), Ok(bytes)) =
+                    (&terminal_norm, fs::read(path.join("origin.txt")))
+                {
+                    let origin = Self::decode_mt5_text(&bytes)
+                        .replace('/', "\\")
+                        .trim_matches('\0')
+                        .trim()
+                        .to_lowercase();
+                    if origin == *expected {
+                        return Some(path);
+                    }
+                }
+
+                let modified = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                fallback.push((modified, path));
+            }
+
+            fallback.sort_by_key(|(modified, _)| *modified);
+            return fallback.pop().map(|(_, path)| path);
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = home;
+            terminal_dir.map(Path::to_path_buf)
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn decode_mt5_text(bytes: &[u8]) -> String {
+        if bytes.starts_with(&[0xFF, 0xFE]) {
+            let units: Vec<u16> = bytes[2..]
+                .chunks_exact(2)
+                .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+                .collect();
+            String::from_utf16_lossy(&units)
+        } else {
+            String::from_utf8_lossy(bytes).into_owned()
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn find_mt5_dir(home: &Path) -> Option<PathBuf> {
+        let mut candidates: Vec<PathBuf> = vec![
+            // macOS: official MT5 app Wine prefix
+            home.join("Library/Application Support/net.metaquotes.wine.metatrader5/drive_c/Program Files/MetaTrader 5"),
+            // Linux / macOS Homebrew Wine
+            home.join(".wine/drive_c/Program Files/MetaTrader 5"),
+        ];
+
+        // macOS CrossOver bottles: scan all bottles for an MT5 install
+        let bottles_root = home.join("Library/Application Support/CrossOver/Bottles");
+        if bottles_root.is_dir() {
+            if let Ok(bottles) = fs::read_dir(&bottles_root) {
+                for bottle in bottles.filter_map(|e| e.ok()) {
+                    let mt5 = bottle.path().join("drive_c/Program Files/MetaTrader 5");
+                    candidates.push(mt5);
+                }
+            }
+        }
+
+        candidates.into_iter().find(|p| p.is_dir())
+    }
+
+    fn detect_display_mode() -> String {
+        if cfg!(target_os = "windows") {
+            return "gui".into();
+        }
+        // On macOS the MT5 native app handles display via its bundled Wine —
+        // no Xvfb needed.
+        if cfg!(target_os = "macos") {
+            return "gui".into();
+        }
+        // Linux: use headless (Xvfb) when no X display is available.
+        if std::env::var("DISPLAY").is_ok() || std::env::var("WAYLAND_DISPLAY").is_ok() {
+            "gui".into()
+        } else {
+            "headless".into()
+        }
+    }
+
+    // ── Persistence ──────────────────────────────────────────────────────────
+
+    pub fn save(&self) -> Result<()> {
+        let path = Self::writable_config_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let none = || "~".to_string();
+        let s = |v: &Option<String>| v.clone().unwrap_or_else(none);
+        let u = |v: Option<u32>| v.map(|n| n.to_string()).unwrap_or_else(none);
+
+        let content = format!(
+            "# mt5-mcp-quant configuration — auto-generated on first run\n\
+             # Edit freely; the server will not overwrite an existing file.\n\
+             \n\
+             wine_executable: {wine}\n\
+             terminal_dir: {term}\n\
+             data_dir: {data}\n\
+             experts_dir: {exp}\n\
+             indicators_dir: {ind}\n\
+             scripts_dir: {scr}\n\
+             tester_profiles_dir: {prof}\n\
+             tester_cache_dir: {cache}\n\
+             display_mode: {disp}\n\
+             \n\
+             backtest_symbol: {sym}\n\
+             backtest_deposit: {dep}\n\
+             backtest_currency: {cur}\n\
+             backtest_leverage: {lev}\n\
+             backtest_model: {mdl}\n\
+             backtest_timeframe: {tf}\n\
+             backtest_timeout: {to}\n\
+             \n\
+             opt_log_dir: {opt_log}\n\
+             opt_min_agents: {opt_agents}\n\
+             opt_max_agents: {max_agents}\n",
+            wine = s(&self.wine_executable),
+            term = s(&self.terminal_dir),
+            data = s(&self.data_dir),
+            exp = s(&self.experts_dir),
+            ind = s(&self.indicators_dir),
+            scr = s(&self.scripts_dir),
+            prof = s(&self.tester_profiles_dir),
+            cache = s(&self.tester_cache_dir),
+            disp = s(&self.display_mode),
+            sym = s(&self.backtest_symbol),
+            dep = u(self.backtest_deposit),
+            cur = s(&self.backtest_currency),
+            lev = u(self.backtest_leverage),
+            mdl = u(self.backtest_model),
+            tf = s(&self.backtest_timeframe),
+            to = u(self.backtest_timeout),
+            opt_log = s(&self.opt_log_dir),
+            opt_agents = u(self.opt_min_agents),
+            max_agents = u(self.opt_max_agents),
+        );
+
+        fs::write(&path, content)?;
+        tracing::info!("Config written to {}", path.display());
+        Ok(())
+    }
+
+    // ── Parsing ───────────────────────────────────────────────────────────────
+
+    fn parse_file(path: &Path) -> Result<Self> {
+        let content = fs::read_to_string(path)?;
+        let mut map: HashMap<String, String> = HashMap::new();
+
+        for (index, line) in content.lines().enumerate() {
+            let line = if index == 0 {
+                line.trim_start_matches('\u{feff}').trim()
+            } else {
+                line.trim()
+            };
+            if line.starts_with('#') || !line.contains(':') {
+                continue;
+            }
+            if let Some((key, value)) = line.split_once(':') {
+                let key = key.trim().to_string();
+                let value = value
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string();
+                if !value.is_empty() && value != "null" && value != "~" {
+                    map.insert(key, value);
+                }
+            }
+        }
+
+        Ok(Config {
+            wine_executable: map.get("wine_executable").cloned(),
+            terminal_dir: map.get("terminal_dir").cloned(),
+            data_dir: map.get("data_dir").cloned(),
+            experts_dir: map.get("experts_dir").cloned(),
+            indicators_dir: map.get("indicators_dir").cloned(),
+            scripts_dir: map.get("scripts_dir").cloned(),
+            tester_profiles_dir: map.get("tester_profiles_dir").cloned(),
+            tester_cache_dir: map.get("tester_cache_dir").cloned(),
+            display_mode: map.get("display_mode").cloned(),
+            backtest_symbol: map.get("backtest_symbol").cloned(),
+            backtest_deposit: map.get("backtest_deposit").and_then(|s| s.parse().ok()),
+            backtest_currency: map.get("backtest_currency").cloned(),
+            backtest_leverage: map.get("backtest_leverage").and_then(|s| s.parse().ok()),
+            backtest_model: map.get("backtest_model").and_then(|s| s.parse().ok()),
+            backtest_timeframe: map.get("backtest_timeframe").cloned(),
+            backtest_timeout: map.get("backtest_timeout").and_then(|s| s.parse().ok()),
+            opt_log_dir: map.get("opt_log_dir").cloned(),
+            opt_min_agents: map.get("opt_min_agents").and_then(|s| s.parse().ok()),
+            opt_max_agents: map.get("opt_max_agents").and_then(|s| s.parse().ok()),
+            reports_dir: map.get("reports_dir").cloned(),
+            backtest_login: map.get("backtest_login").cloned(),
+            backtest_server: map.get("backtest_server").cloned(),
+            backtest_password: map.get("backtest_password").cloned(),
+            project_dir: map.get("project_dir").cloned(),
+        })
+    }
+
+    // ── Accessors ────────────────────────────────────────────────────────────
+
+    pub fn get(&self, key: &str) -> String {
+        match key {
+            "wine_executable" => self.wine_executable.clone().unwrap_or_default(),
+            "terminal_dir" => self.terminal_dir.clone().unwrap_or_default(),
+            "data_dir" => self.data_dir.clone().unwrap_or_default(),
+            "experts_dir" => self.experts_dir.clone().unwrap_or_default(),
+            "tester_profiles_dir" => self.tester_profiles_dir.clone().unwrap_or_default(),
+            "tester_cache_dir" => self.tester_cache_dir.clone().unwrap_or_default(),
+            "display_mode" => self
+                .display_mode
+                .clone()
+                .unwrap_or_else(|| "auto".to_string()),
+            "backtest_symbol" => self.backtest_symbol.clone().unwrap_or_default(),
+            "backtest_deposit" => self.backtest_deposit.unwrap_or(10000).to_string(),
+            "backtest_currency" => self
+                .backtest_currency
+                .clone()
+                .unwrap_or_else(|| "USD".to_string()),
+            "backtest_leverage" => self.backtest_leverage.unwrap_or(500).to_string(),
+            "backtest_model" => self.backtest_model.unwrap_or(0).to_string(),
+            "backtest_timeframe" => self
+                .backtest_timeframe
+                .clone()
+                .unwrap_or_else(|| "M5".to_string()),
+            "backtest_timeout" => self.backtest_timeout.unwrap_or(900).to_string(),
+            "opt_log_dir" => self.opt_log_dir.clone().unwrap_or_else(|| {
+                std::env::temp_dir()
+                    .join("mt5-mcp-quant")
+                    .join("logs")
+                    .to_string_lossy()
+                    .to_string()
+            }),
+            "opt_min_agents" => self.opt_min_agents.unwrap_or(1).to_string(),
+            "opt_max_agents" => self.opt_max_agents.unwrap_or(0).to_string(),
+            "reports_dir" => self
+                .reports_dir
+                .clone()
+                .unwrap_or_else(|| "reports".to_string()),
+            "backtest_login" => self.backtest_login.clone().unwrap_or_default(),
+            "backtest_server" => self.backtest_server.clone().unwrap_or_default(),
+            "backtest_password" => self.backtest_password.clone().unwrap_or_default(),
+            "project_dir" => self.project_dir.clone().unwrap_or_default(),
+            _ => String::new(),
+        }
+    }
+
+    /// Root of the MCP installation.
+    /// Priority: $MT5_MCP_QUANT_HOME > binary parent dir > ~/.config/mt5-mcp-quant
+    pub fn installation_dir() -> PathBuf {
+        // 1. Check env override first
+        if let Ok(home) = std::env::var("MT5_MCP_QUANT_HOME") {
+            return Path::new(&home).to_path_buf();
+        }
+
+        // 2. Check if binary is in a non-standard location (development/portable)
+        // with an existing config file
+        if let Some(binary_dir) = Self::binary_dir() {
+            let binary_str = binary_dir.to_string_lossy();
+            let is_system_path = binary_str.starts_with("/usr/local/bin")
+                || binary_str.starts_with("/usr/bin")
+                || binary_str.starts_with("/bin");
+
+            if !is_system_path
+                && binary_dir
+                    .join("config")
+                    .join("mt5-mcp-quant.yaml")
+                    .exists()
+            {
+                return binary_dir;
+            }
+        }
+
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        if manifest_dir
+            .join("config")
+            .join("mt5-mcp-quant.yaml")
+            .exists()
+        {
+            return manifest_dir.to_path_buf();
+        }
+
+        // 3. Fall back to standard location
+        Self::standard_config_dir()
+    }
+
+    /// Get the directory where the current binary is located
+    fn binary_dir() -> Option<PathBuf> {
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|p| p.to_path_buf()))
+    }
+
+    /// Standard config directory in user's home
+    fn standard_config_dir() -> PathBuf {
+        #[cfg(target_os = "windows")]
+        {
+            return dirs::config_dir()
+                .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
+                .join("mt5-mcp-quant");
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        dirs::home_dir()
+            .unwrap_or_else(|| Path::new(".").to_path_buf())
+            .join(".config")
+            .join("mt5-mcp-quant")
+    }
+
+    /// Centralized report data directory (metadata + deals, no HTML).
+    /// Always inside the MCP installation dir, never in the project.
+    pub fn reports_dir(&self) -> PathBuf {
+        if let Some(dir) = &self.reports_dir {
+            let p = Path::new(dir);
+            if p.is_absolute() {
+                return p.to_path_buf();
+            }
+        }
+        Self::installation_dir().join("reports")
+    }
+
+    /// Path to the SQLite report registry.
+    pub fn db_path() -> PathBuf {
+        Self::installation_dir().join("reports.db")
+    }
+
+    /// Temp directory for equity chart images, scoped per report.
+    pub fn charts_temp_dir(report_id: &str) -> PathBuf {
+        std::env::temp_dir()
+            .join("mt5-mcp-quant")
+            .join("charts")
+            .join(report_id)
+    }
+
+    pub fn mt5_dir(&self) -> Option<PathBuf> {
+        self.data_dir
+            .as_ref()
+            .or(self.terminal_dir.as_ref())
+            .map(PathBuf::from)
+    }
+
+    pub fn terminal_install_dir(&self) -> Option<PathBuf> {
+        self.terminal_dir.as_ref().map(PathBuf::from)
+    }
+
+    pub fn terminal_executable(&self) -> Option<PathBuf> {
+        self.terminal_install_dir()
+            .map(|dir| dir.join("terminal64.exe"))
+    }
+
+    pub fn metaeditor_executable(&self) -> Option<PathBuf> {
+        self.terminal_install_dir()
+            .map(|dir| dir.join("metaeditor64.exe"))
+    }
+
+    pub fn metatester_executable(&self) -> Option<PathBuf> {
+        self.terminal_install_dir()
+            .map(|dir| dir.join("metatester64.exe"))
+    }
+
+    pub const fn requires_wine() -> bool {
+        !cfg!(target_os = "windows")
+    }
+
+    /// Scan the tester's own history store for symbols with downloaded data.
+    ///
+    /// MT5 maintains two separate history trees:
+    ///   • `Bases/{server}/history/`  — live-trading tick/bar data (NOT usable by tester)
+    ///   • `Tester/bases/{server}/history/` — data the Strategy Tester actually reads
+    ///
+    /// Scanning `Bases/` (the old approach) returned symbols that exist for live trading
+    /// but may have no tester data, causing the tester to fail with "symbol does not exist".
+    /// This function scans `Tester/bases/` instead, which is the authoritative source.
+    ///
+    /// Falls back to `Bases/` only when `Tester/bases/` is absent (first-run / no backtests yet).
+    ///
+    /// If `server_filter` is provided only that server's directory is scanned.
+    pub fn discover_symbols(&self, server_filter: Option<&str>) -> Vec<String> {
+        let mt5_dir = match self.mt5_dir() {
+            Some(d) => d,
+            None => return Vec::new(),
+        };
+
+        // Prefer the tester's own data store; fall back to live-trading Bases/ when absent.
+        let tester_bases = mt5_dir.join("Tester").join("bases");
+        let bases_dir = if tester_bases.is_dir() {
+            tester_bases
+        } else {
+            let fallback = mt5_dir.join("Bases");
+            if !fallback.is_dir() {
+                return Vec::new();
+            }
+            tracing::warn!(
+                "Tester/bases/ not found — falling back to Bases/ for symbol discovery. \
+                 Run at least one backtest to populate tester data."
+            );
+            fallback
+        };
+
+        let mut symbols = std::collections::HashSet::new();
+
+        // {bases_dir}/{server}/history/{symbol}/   — directory presence = data available
+        // (the tester uses .hst/.hcc files; existence of the directory is sufficient)
+        if let Ok(servers) = fs::read_dir(&bases_dir) {
+            for server in servers.filter_map(|e| e.ok()) {
+                let server_name_os = server.file_name();
+                let server_name = server_name_os.to_str().unwrap_or("");
+
+                if server_name.is_empty() {
+                    continue;
+                }
+                if let Some(filter) = server_filter {
+                    if server_name != filter {
+                        continue;
+                    }
+                }
+
+                let history_dir = server.path().join("history");
+                if !history_dir.is_dir() {
+                    continue;
+                }
+                if let Ok(sym_entries) = fs::read_dir(&history_dir) {
+                    for sym_entry in sym_entries.filter_map(|e| e.ok()) {
+                        let sym_path = sym_entry.path();
+                        if !sym_path.is_dir() {
+                            continue;
+                        }
+                        if let Some(name) = sym_path.file_name().and_then(|n| n.to_str()) {
+                            symbols.insert(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut sorted: Vec<String> = symbols.into_iter().collect();
+        sorted.sort();
+        sorted
+    }
+
+    /// Find the closest available tester symbol to the one requested.
+    ///
+    /// Matching priority (first hit wins):
+    ///   1. Exact match                           → `XAUUSD.cent` == `XAUUSD.cent`
+    ///   2. Case-insensitive exact match          → `xauusd.cent` → `XAUUSD.cent`
+    ///   3. Strip/add common cent suffixes        → `XAUUSDc` ↔ `XAUUSD.cent`
+    ///   4. Prefix match on the base ticker       → `XAUUSD` matches `XAUUSD.cent`
+    pub fn resolve_symbol<'a>(requested: &str, available: &'a [String]) -> Option<&'a str> {
+        if available.is_empty() {
+            return None;
+        }
+
+        // 1. Exact
+        if let Some(s) = available.iter().find(|s| s.as_str() == requested) {
+            return Some(s.as_str());
+        }
+
+        // 2. Case-insensitive exact
+        let req_lower = requested.to_lowercase();
+        if let Some(s) = available.iter().find(|s| s.to_lowercase() == req_lower) {
+            return Some(s.as_str());
+        }
+
+        // 3. Cent-suffix normalisation: build a normalised "base" for both sides
+        //    Strip known cent suffixes: `.cent`, `c` (trailing, uppercase only), `.c`
+        fn base_ticker(sym: &str) -> &str {
+            let s = sym.trim_end_matches(".cent").trim_end_matches(".c");
+            // Strip trailing lowercase 'c' only when the rest is all-uppercase
+            // (so "XAUUSDc" → "XAUUSD", but "Misc" stays "Misc")
+            if s.ends_with('c')
+                && s[..s.len() - 1]
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+            {
+                &s[..s.len() - 1]
+            } else {
+                s
+            }
+        }
+
+        let req_base = base_ticker(requested).to_lowercase();
+        if let Some(s) = available
+            .iter()
+            .find(|s| base_ticker(s).to_lowercase() == req_base)
+        {
+            return Some(s.as_str());
+        }
+
+        // 4. Prefix match: available symbol starts with the requested string (or vice-versa)
+        if let Some(s) = available.iter().find(|s| {
+            let sl = s.to_lowercase();
+            sl.starts_with(&req_lower) || req_lower.starts_with(sl.as_str())
+        }) {
+            return Some(s.as_str());
+        }
+
+        None
+    }
+
+    /// Get the currently active MT5 account from common.ini
+    pub fn current_account(&self) -> Option<CurrentAccount> {
+        self.mt5_dir()
+            .and_then(|d| CurrentAccount::from_common_ini(&d))
+    }
+
+    /// Discover symbols for the currently active account/server only
+    pub fn discover_symbols_for_active_account(&self) -> Vec<String> {
+        match self.current_account() {
+            Some(account) => self.discover_symbols(Some(&account.server)),
+            None => self.discover_symbols(None),
+        }
+    }
+
+    /// Get all available servers that have symbol data
+    pub fn available_servers(&self) -> Vec<String> {
+        let mt5_dir = match self.mt5_dir() {
+            Some(d) => d,
+            None => return Vec::new(),
+        };
+
+        let bases_dir = mt5_dir.join("Bases");
+        if !bases_dir.is_dir() {
+            return Vec::new();
+        }
+
+        let mut servers = Vec::new();
+        if let Ok(entries) = fs::read_dir(&bases_dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.is_dir() {
+                    if let Some(name) = entry.file_name().to_str() {
+                        servers.push(name.to_string());
+                    }
+                }
+            }
+        }
+        servers.sort();
+        servers
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_quoted_native_windows_paths() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("mt5-mcp-quant.yaml");
+        fs::write(
+            &path,
+            "terminal_dir: 'C:\\Program Files\\MetaTrader 5'\n\
+             data_dir: 'C:\\Users\\trader\\AppData\\Roaming\\MetaQuotes\\Terminal\\ABC123'\n\
+             backtest_model: 0\n",
+        )
+        .expect("write config");
+
+        let config = Config::parse_file(&path).expect("parse config");
+        assert_eq!(
+            config.terminal_dir.as_deref(),
+            Some(r"C:\Program Files\MetaTrader 5")
+        );
+        assert_eq!(
+            config.data_dir.as_deref(),
+            Some(r"C:\Users\trader\AppData\Roaming\MetaQuotes\Terminal\ABC123")
+        );
+        assert_eq!(config.backtest_model, Some(0));
+    }
+
+    #[test]
+    fn parses_utf8_bom_prefixed_config() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("mt5-mcp-quant.yaml");
+        std::fs::write(
+            &path,
+            b"\xEF\xBB\xBFterminal_dir: 'C:\\Program Files\\MetaTrader 5'\n",
+        )
+        .expect("write config");
+
+        let config = Config::parse_file(&path).expect("parse BOM-prefixed config");
+        assert_eq!(
+            config.terminal_dir.as_deref(),
+            Some("C:\\Program Files\\MetaTrader 5")
+        );
+    }
+
+    #[test]
+    fn resolves_common_broker_symbol_suffixes() {
+        let symbols = vec!["EURUSD".to_string(), "XAUUSDc".to_string()];
+        assert_eq!(Config::resolve_symbol("XAUUSD", &symbols), Some("XAUUSDc"));
+        assert_eq!(Config::resolve_symbol("eurusd", &symbols), Some("EURUSD"));
+    }
+}

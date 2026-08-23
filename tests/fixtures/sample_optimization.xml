@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet">
+  <Worksheet>
+    <Table>
+      <Row>
+        <Cell><Data>Pass</Data></Cell>
+        <Cell><Data>Result</Data></Cell>
+        <Cell><Data>Profit</Data></Cell>
+        <Cell><Data>Total Trades</Data></Cell>
+        <Cell><Data>Profit Factor</Data></Cell>
+        <Cell><Data>Expected Payoff</Data></Cell>
+        <Cell><Data>Equity DD %</Data></Cell>
+        <Cell><Data>TP_Pips</Data></Cell>
+        <Cell><Data>UseFilter</Data></Cell>
+      </Row>
+      <Row>
+        <Cell><Data>0</Data></Cell>
+        <Cell><Data>10</Data></Cell>
+        <Cell><Data>125.5</Data></Cell>
+        <Cell><Data>8</Data></Cell>
+        <Cell><Data>1.75</Data></Cell>
+        <Cell><Data>15.68</Data></Cell>
+        <Cell><Data>4.2</Data></Cell>
+        <Cell><Data>400</Data></Cell>
+        <Cell><Data>true</Data></Cell>
+      </Row>
+    </Table>
+  </Worksheet>
+</Workbook>

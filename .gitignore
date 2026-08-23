@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Runtime data and generated reports (never publish)
+reports/
+reports.db
+.mt5_mcp_quant_history/
+test-artifacts/
+
+# Job metadata
+.mt5_mcp_quant_jobs/
+
+# Config (contains local paths)
+config/mt5-mcp-quant.yaml
+config/baseline.json
+config/backtest_history.json
+
+# Agent configs (personal LLM instructions)
+CLAUDE.md
+.claude/
+.ocx
+.opencode
+AGENTS.md
+
+# Windsurf (local workflows, not for repo)
+.windsurf/
+
+# VS Code
+.vscode/
+
+# Codegraph
+.codegraph/
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+/tmp/mt5opt_*
+
+
+# Added by cargo
+
+/target

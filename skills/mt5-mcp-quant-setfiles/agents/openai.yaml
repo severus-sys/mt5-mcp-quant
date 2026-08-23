@@ -1,0 +1,11 @@
+interface:
+  display_name: "MT5 Set Files"
+  short_description: "UTF-16LE set dosyalarını güvenle yönetir"
+  default_prompt: "Use $mt5-mcp-quant-setfiles to inspect and update my EA parameter set."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "mt5_mcp_quant"
+      description: "Native Windows MT5-MCP-Quant MCP server"
+policy:
+  allow_implicit_invocation: true

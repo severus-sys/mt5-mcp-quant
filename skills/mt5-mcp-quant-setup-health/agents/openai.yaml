@@ -1,0 +1,11 @@
+interface:
+  display_name: "MT5 Setup and Health"
+  short_description: "Windows MT5 ve MCP hazırlığını doğrular"
+  default_prompt: "Use $mt5-mcp-quant-setup-health to verify that my Windows MT5 MCP is ready."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "mt5_mcp_quant"
+      description: "Native Windows MT5-MCP-Quant MCP server"
+policy:
+  allow_implicit_invocation: true

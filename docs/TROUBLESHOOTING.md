@@ -1,0 +1,76 @@
+# Windows Troubleshooting
+
+Run `verify_setup` first. It validates the executable directory, active MT5 data directory, MetaEditor, tester profiles, reports directory, and SQLite path.
+
+## `terminal64.exe` not found
+
+Run setup with an explicit program directory:
+
+```powershell
+.\scripts\setup.ps1 -TerminalDir 'C:\Program Files\MetaTrader 5' -Force
+```
+
+Broker-branded installations may use a different folder name. The correct directory contains `terminal64.exe`, `metaeditor64.exe`, and `metatester64.exe`.
+
+## MT5 data directory not found
+
+Open MT5 once, sign in, then choose **File → Open Data Folder**. Pass that path explicitly:
+
+```powershell
+.\scripts\setup.ps1 `
+  -TerminalDir 'C:\Program Files\MetaTrader 5' `
+  -DataDir "$env:APPDATA\MetaQuotes\Terminal\INSTANCE_ID" `
+  -Force
+```
+
+Do not confuse the program directory with the data directory. A standard Windows installation separates them.
+
+## Rust build fails with `link.exe not found`
+
+Install Visual Studio Build Tools with **Desktop development with C++** and a Windows SDK, then open a new terminal. Rust’s official Windows MSVC toolchain requires this linker. Alternatively use a configured `x86_64-pc-windows-gnu` toolchain.
+
+## Application Control blocks Cargo build scripts
+
+Corporate Windows policies may block unsigned temporary executables produced by Cargo (`os error 4551`). Build in the project’s Windows GitHub Actions job or ask the administrator to allow developer build outputs. Do not disable security policy globally.
+
+If the policy already permits Cargo's dependency/test output directory, the project can build an optimized binary there without changing the policy:
+
+```powershell
+.\scripts\build-windows.ps1 -AppControlCompatible
+```
+
+The resulting binary is `target\debug\deps\mt5-mcp-quant-release.exe`.
+
+## MCP server does not appear
+
+- Use the absolute path to `mt5-mcp-quant.exe`.
+- Pass `--stdio` when your client configuration requires explicit arguments.
+- Restart the MCP connection after rebuilding or updating; clients keep the old process in memory.
+
+## Backtest does not produce a report
+
+1. Confirm MT5 is signed in and the requested symbol exists with the broker suffix.
+2. Open Strategy Tester once and download history for that symbol.
+3. Check `<data_dir>\MQL5\Logs` and `<data_dir>\Tester\Agent-*\logs`.
+4. Use `model=0` for grid/martingale EAs.
+5. Run `check_mt5_process`, `get_mt5_logs`, and `get_backtest_crash_info`.
+
+The inactivity watchdog can stop a stuck tester and fall back to journal extraction, but full P/L analytics require the HTML/XML report.
+
+## `.set` parameters or optimization flags disappear
+
+Use `write_set_file`, `patch_set_file`, `clone_set_file`, or `set_from_optimization`. These tools write UTF-16LE with a BOM and apply the Windows read-only attribute before MT5 starts. Avoid saving optimization `.set` files as UTF-8.
+
+## Optimization exits immediately
+
+MT5 may leave `OptMode=-1` after an interrupted run. The pipeline resets this automatically before launch. If required, close MT5, inspect `<data_dir>\config\terminal.ini`, and rerun `validate_mt5_config`.
+
+## Analytics says report not found
+
+Analytics resolve data from SQLite in this order:
+
+1. `report_id`
+2. `report_dir`
+3. latest report
+
+Deals are stored in the `deals` table; `deals.csv` is only created by `export_deals_csv`.

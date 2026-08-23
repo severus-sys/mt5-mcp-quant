@@ -1,0 +1,11 @@
+interface:
+  display_name: "MT5 Trade Analytics"
+  short_description: "Deal ve performans nedenlerini ayrıntılı analiz eder"
+  default_prompt: "Use $mt5-mcp-quant-analytics to explain the profit, losses, and drawdown in my latest report."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "mt5_mcp_quant"
+      description: "Native Windows MT5-MCP-Quant MCP server"
+policy:
+  allow_implicit_invocation: true

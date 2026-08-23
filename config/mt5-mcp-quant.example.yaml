@@ -1,0 +1,38 @@
+# mt5-mcp-quant native Windows configuration
+# Run scripts/setup.ps1 to discover these paths automatically.
+
+# Directory containing terminal64.exe, metaeditor64.exe, and metatester64.exe.
+terminal_dir: 'C:\Program Files\MetaTrader 5'
+
+# MT5 user-data instance. Open MT5 -> File -> Open Data Folder to confirm it.
+data_dir: 'C:\Users\YOUR_USER\AppData\Roaming\MetaQuotes\Terminal\INSTANCE_ID'
+
+# Data directories (normally derived from data_dir by setup.ps1).
+experts_dir: 'C:\Users\YOUR_USER\AppData\Roaming\MetaQuotes\Terminal\INSTANCE_ID\MQL5\Experts'
+indicators_dir: 'C:\Users\YOUR_USER\AppData\Roaming\MetaQuotes\Terminal\INSTANCE_ID\MQL5\Indicators'
+scripts_dir: 'C:\Users\YOUR_USER\AppData\Roaming\MetaQuotes\Terminal\INSTANCE_ID\MQL5\Scripts'
+tester_profiles_dir: 'C:\Users\YOUR_USER\AppData\Roaming\MetaQuotes\Terminal\INSTANCE_ID\MQL5\Profiles\Tester'
+tester_cache_dir: 'C:\Users\YOUR_USER\AppData\Roaming\MetaQuotes\Terminal\INSTANCE_ID\Tester'
+
+display_mode: gui
+project_dir: 'C:\path\to\your\ea\project'
+
+backtest_symbol: EURUSD
+backtest_deposit: 10000
+backtest_currency: USD
+backtest_leverage: 100
+backtest_model: 0
+backtest_timeframe: H1
+backtest_timeout: 900
+
+opt_log_dir: 'C:\Users\YOUR_USER\AppData\Local\Temp\mt5-mcp-quant\logs'
+opt_min_agents: 1
+# 0 lets MT5-MCP-Quant choose from available CPU cores.
+opt_max_agents: 0
+
+reports_dir: 'C:\path\to\your\ea\project\reports'
+
+# Optional. Usually omitted so MT5 reuses the signed-in desktop session.
+# backtest_login: '12345678'
+# backtest_server: 'Broker-Server'
+# backtest_password:

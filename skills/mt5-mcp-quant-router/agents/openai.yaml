@@ -1,0 +1,11 @@
+interface:
+  display_name: "MT5-MCP-Quant Router"
+  short_description: "Belirsiz MT5 isteklerini doğru akışa yönlendirir"
+  default_prompt: "Use $mt5-mcp-quant-router to inspect my MT5 context and choose the right next workflow."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "mt5_mcp_quant"
+      description: "Native Windows MT5-MCP-Quant MCP server"
+policy:
+  allow_implicit_invocation: true

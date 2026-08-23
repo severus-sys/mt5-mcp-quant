@@ -1,0 +1,11 @@
+interface:
+  display_name: "MT5 MQL Development"
+  short_description: "MQL5 kaynaklarını bulur, doğrular ve derler"
+  default_prompt: "Use $mt5-mcp-quant-mql-development to validate and compile my MQL5 Expert Advisor."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "mt5_mcp_quant"
+      description: "Native Windows MT5-MCP-Quant MCP server"
+policy:
+  allow_implicit_invocation: true
