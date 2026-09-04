@@ -7,12 +7,12 @@
     "url": "https://github.com/severus-sys/mt5-mcp-quant",
     "source": "github"
   },
-  "version": "1.35.0",
+  "version": "1.35.1",
   "packages": [
     {
       "registryType": "mcpb",
-      "version": "1.35.0",
-      "identifier": "https://github.com/severus-sys/mt5-mcp-quant/releases/download/v1.35.0/mt5-mcp-quant-windows-x64.mcpb",
+      "version": "1.35.1",
+      "identifier": "https://github.com/severus-sys/mt5-mcp-quant/releases/download/v1.35.1/mt5-mcp-quant-windows-x64.mcpb",
       "transport": {
         "type": "stdio"
       },
@@ -24,7 +24,7 @@
           "name": "MT5_MCP_QUANT_HOME"
         }
       ],
-      "fileSha256": "2673248eb3451778c7d8db1c99c60119972942e520c15461063532d7d298cf53"
+      "fileSha256": "0d0ce6c2672558b24f2644bf2db5f9765c5e335166cafe0d3e4a6056dd1eb614"
     }
   ]
 }
