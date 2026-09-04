@@ -820,56 +820,14 @@ impl Config {
     ///   2. Case-insensitive exact match          → `xauusd.cent` → `XAUUSD.cent`
     ///   3. Strip/add common cent suffixes        → `XAUUSDc` ↔ `XAUUSD.cent`
     ///   4. Prefix match on the base ticker       → `XAUUSD` matches `XAUUSD.cent`
+    #[allow(dead_code)] // Retained for callers using the pre-v1.35 Config helper.
     pub fn resolve_symbol<'a>(requested: &str, available: &'a [String]) -> Option<&'a str> {
-        if available.is_empty() {
-            return None;
-        }
-
-        // 1. Exact
-        if let Some(s) = available.iter().find(|s| s.as_str() == requested) {
-            return Some(s.as_str());
-        }
-
-        // 2. Case-insensitive exact
-        let req_lower = requested.to_lowercase();
-        if let Some(s) = available.iter().find(|s| s.to_lowercase() == req_lower) {
-            return Some(s.as_str());
-        }
-
-        // 3. Cent-suffix normalisation: build a normalised "base" for both sides
-        //    Strip known cent suffixes: `.cent`, `c` (trailing, uppercase only), `.c`
-        fn base_ticker(sym: &str) -> &str {
-            let s = sym.trim_end_matches(".cent").trim_end_matches(".c");
-            // Strip trailing lowercase 'c' only when the rest is all-uppercase
-            // (so "XAUUSDc" → "XAUUSD", but "Misc" stays "Misc")
-            if s.ends_with('c')
-                && s[..s.len() - 1]
-                    .chars()
-                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
-            {
-                &s[..s.len() - 1]
-            } else {
-                s
-            }
-        }
-
-        let req_base = base_ticker(requested).to_lowercase();
-        if let Some(s) = available
+        let resolved = crate::models::resolve_symbol(requested, available);
+        let symbol = resolved.resolved()?;
+        available
             .iter()
-            .find(|s| base_ticker(s).to_lowercase() == req_base)
-        {
-            return Some(s.as_str());
-        }
-
-        // 4. Prefix match: available symbol starts with the requested string (or vice-versa)
-        if let Some(s) = available.iter().find(|s| {
-            let sl = s.to_lowercase();
-            sl.starts_with(&req_lower) || req_lower.starts_with(sl.as_str())
-        }) {
-            return Some(s.as_str());
-        }
-
-        None
+            .find(|candidate| candidate.as_str() == symbol)
+            .map(String::as_str)
     }
 
     /// Get the currently active MT5 account from common.ini

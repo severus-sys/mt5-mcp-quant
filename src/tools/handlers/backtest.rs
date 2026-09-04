@@ -1,5 +1,5 @@
 use crate::models::report::BacktestJob;
-use crate::models::Config;
+use crate::models::{resolve_symbol, Config, SymbolMatch};
 use crate::pipeline::backtest::{BacktestParams, BacktestPipeline};
 use anyhow::Result;
 use chrono::Datelike;
@@ -15,6 +15,89 @@ struct BacktestPreflight {
     available_symbols: Vec<String>,
     ea_exists: bool,
     server: Option<String>,
+}
+
+#[derive(Debug)]
+struct OperationalSymbol {
+    requested: String,
+    resolved: String,
+    resolution: Value,
+}
+
+fn resolve_tester_symbol(
+    config: &Config,
+    supplied: &str,
+    available: &[String],
+    server: &str,
+    login: &str,
+) -> std::result::Result<OperationalSymbol, Value> {
+    let effective = if supplied.trim().is_empty() {
+        config.backtest_symbol.as_deref().unwrap_or("").trim()
+    } else {
+        supplied.trim()
+    };
+
+    if effective.is_empty() {
+        if let Some(first) = available.first() {
+            return Ok(OperationalSymbol {
+                requested: String::new(),
+                resolved: first.clone(),
+                resolution: json!({ "status": "default", "method": "first_tester_symbol" }),
+            });
+        }
+    }
+
+    let matched = resolve_symbol(effective, available);
+    let resolution = match &matched {
+        SymbolMatch::Exact(_) => json!({ "status": "exact" }),
+        SymbolMatch::Alias { kind, .. } => json!({ "status": "alias", "method": kind }),
+        SymbolMatch::Ambiguous(candidates) => json!({
+            "status": "ambiguous",
+            "candidates": candidates,
+        }),
+        SymbolMatch::NoMatch => json!({ "status": "no_match" }),
+    };
+
+    if let Some(resolved) = matched.resolved() {
+        return Ok(OperationalSymbol {
+            requested: effective.to_string(),
+            resolved: resolved.to_string(),
+            resolution,
+        });
+    }
+
+    let code = if matches!(matched, SymbolMatch::Ambiguous(_)) {
+        "symbol_ambiguous"
+    } else {
+        "symbol_not_in_tester_history"
+    };
+    let hint = if matches!(matched, SymbolMatch::Ambiguous(_)) {
+        "Pass one exact broker symbol from candidates. No symbol was selected automatically."
+    } else {
+        "Download this symbol's history in MT5 Strategy Tester, then retry. Market Watch and tester history are separate catalogs."
+    };
+
+    Err(json!({
+        "content": [{ "type": "text", "text": json!({
+            "error": if matches!(matched, SymbolMatch::Ambiguous(_)) {
+                format!("Symbol '{}' matches more than one tester symbol.", effective)
+            } else {
+                format!("Symbol '{}' has no tester history on server '{}'.", effective, server)
+            },
+            "code": code,
+            "pre_check": code,
+            "requested_symbol": effective,
+            "resolved_symbol": null,
+            "symbol_resolution": resolution,
+            "candidates": matched.candidates(),
+            "available_symbols": available,
+            "active_server": server,
+            "account": { "login": login, "server": server },
+            "broker_status": "unknown",
+            "hint": hint,
+        }).to_string() }],
+        "isError": true
+    }))
 }
 
 impl BacktestPreflight {
@@ -77,100 +160,17 @@ pub async fn handle_run_backtest(config: &Config, args: &Value) -> Result<Value>
         }));
     }
 
-    // Symbol pre-flight with account context
     let requested_symbol = args.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
-
-    // No tester data at all → hard fail with helpful context
-    let no_symbols_error = || {
-        json!({
-            "content": [{ "type": "text", "text": json!({
-                "error": format!("No symbols available for backtesting on server '{}'.", active_server),
-                "account": { "login": active_login, "server": active_server },
-                "hint": "Open MT5 → View → Strategy Tester → download history for at least one symbol.",
-                "pre_check": "no_symbols"
-            }).to_string() }],
-            "isError": true
-        })
+    let symbol = match resolve_tester_symbol(
+        config,
+        requested_symbol,
+        &preflight.available_symbols,
+        active_server,
+        active_login,
+    ) {
+        Ok(symbol) => symbol,
+        Err(response) => return Ok(response),
     };
-
-    let symbol: String = if requested_symbol.is_empty() {
-        // No symbol requested — use config default or first available tester symbol.
-        let candidate = config.backtest_symbol.as_deref().unwrap_or("");
-        if candidate.is_empty() {
-            preflight
-                .available_symbols
-                .first()
-                .cloned()
-                .ok_or(())
-                .unwrap_or_else(|_| return String::new())
-        } else {
-            match Config::resolve_symbol(candidate, &preflight.available_symbols) {
-                Some(resolved) => {
-                    if resolved != candidate {
-                        tracing::warn!(
-                            "Config symbol '{}' not in tester data for '{}'; using '{}' instead",
-                            candidate,
-                            active_server,
-                            resolved
-                        );
-                    }
-                    resolved.to_string()
-                }
-                None => {
-                    // Config default has no tester data — pick first available
-                    preflight
-                        .available_symbols
-                        .first()
-                        .cloned()
-                        .unwrap_or_default()
-                }
-            }
-        }
-    } else {
-        // Caller specified a symbol — resolve it against actual tester data.
-        if preflight.available_symbols.is_empty() {
-            return Ok(no_symbols_error());
-        }
-        match Config::resolve_symbol(requested_symbol, &preflight.available_symbols) {
-            Some(resolved) if resolved == requested_symbol => {
-                // Exact match — use as-is
-                resolved.to_string()
-            }
-            Some(resolved) => {
-                // Fuzzy match — proceed with the corrected symbol, surface the substitution
-                tracing::warn!(
-                    "Symbol '{}' not in tester data for '{}'; substituting '{}'",
-                    requested_symbol,
-                    active_server,
-                    resolved
-                );
-                resolved.to_string()
-            }
-            None => {
-                // No match at all — fail with full context so the caller can act
-                return Ok(json!({
-                    "content": [{ "type": "text", "text": json!({
-                        "error": format!(
-                            "Symbol '{}' has no tester data on server '{}' and no close match was found.",
-                            requested_symbol, active_server
-                        ),
-                        "account": { "login": active_login, "server": active_server },
-                        "requested_symbol": requested_symbol,
-                        "available_symbols": preflight.available_symbols,
-                        "hint": "The tester data for this symbol hasn't been downloaded yet. \
-                                 Open MT5 → Strategy Tester → select the symbol and click Download.",
-                        "pre_check": "symbol_not_available"
-                    }).to_string() }],
-                    "isError": true
-                }));
-            }
-        }
-    };
-
-    // Guard against the empty-string edge case (no symbols at all)
-    if symbol.is_empty() {
-        return Ok(no_symbols_error());
-    }
 
     // EA existence check with context
     if !preflight.ea_exists {
@@ -197,7 +197,7 @@ pub async fn handle_run_backtest(config: &Config, args: &Value) -> Result<Value>
 
     let params = BacktestParams {
         expert: expert.to_string(),
-        symbol: symbol.to_string(),
+        symbol: symbol.resolved.clone(),
         from_date: from_date.to_string(),
         to_date: to_date.to_string(),
         timeframe: args
@@ -253,7 +253,10 @@ pub async fn handle_run_backtest(config: &Config, args: &Value) -> Result<Value>
             "success": result.success,
             "report_dir": result.report_dir.to_string_lossy(),
             "duration_seconds": result.duration_seconds,
-            "message": result.message
+            "message": result.message,
+            "requested_symbol": symbol.requested,
+            "resolved_symbol": symbol.resolved,
+            "symbol_resolution": symbol.resolution,
         }).to_string() }],
         "isError": !result.success
     }))
@@ -310,54 +313,22 @@ pub async fn handle_launch_backtest(
         }));
     }
 
-    // Get symbol — resolve against actual tester data (same logic as handle_run_backtest)
     let active_server = preflight.server.as_deref().unwrap_or("unknown");
+    let active_login = preflight
+        .account
+        .as_ref()
+        .map(|account| account.login.as_str())
+        .unwrap_or("unknown");
     let requested_symbol = args.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
-
-    let symbol: String = if requested_symbol.is_empty() {
-        let candidate = handler.config.backtest_symbol.as_deref().unwrap_or("");
-        if candidate.is_empty() {
-            preflight
-                .available_symbols
-                .first()
-                .cloned()
-                .unwrap_or_default()
-        } else {
-            Config::resolve_symbol(candidate, &preflight.available_symbols)
-                .map(|s| s.to_string())
-                .or_else(|| preflight.available_symbols.first().cloned())
-                .unwrap_or_else(|| candidate.to_string())
-        }
-    } else {
-        match Config::resolve_symbol(requested_symbol, &preflight.available_symbols) {
-            Some(resolved) => {
-                if resolved != requested_symbol {
-                    tracing::warn!(
-                        "launch_backtest: symbol '{}' not in tester data for '{}'; using '{}'",
-                        requested_symbol,
-                        active_server,
-                        resolved
-                    );
-                }
-                resolved.to_string()
-            }
-            None if preflight.available_symbols.is_empty() => requested_symbol.to_string(),
-            None => {
-                return Ok(json!({
-                    "content": [{ "type": "text", "text": json!({
-                        "error": format!(
-                            "Symbol '{}' has no tester data on server '{}' and no close match was found.",
-                            requested_symbol, active_server
-                        ),
-                        "requested_symbol": requested_symbol,
-                        "available_symbols": preflight.available_symbols,
-                        "hint": "Open MT5 → Strategy Tester → select the symbol and click Download.",
-                        "pre_check": "symbol_not_available"
-                    }).to_string() }],
-                    "isError": true
-                }));
-            }
-        }
+    let symbol = match resolve_tester_symbol(
+        &handler.config,
+        requested_symbol,
+        &preflight.available_symbols,
+        active_server,
+        active_login,
+    ) {
+        Ok(symbol) => symbol,
+        Err(response) => return Ok(response),
     };
 
     // EA existence check
@@ -384,7 +355,7 @@ pub async fn handle_launch_backtest(
 
     let params = BacktestParams {
         expert: expert.to_string(),
-        symbol: symbol.to_string(),
+        symbol: symbol.resolved.clone(),
         from_date: from_date.to_string(),
         to_date: to_date.to_string(),
         timeframe: args
@@ -452,6 +423,9 @@ pub async fn handle_launch_backtest(
             "report_dir": job.report_dir,
             "expert": job.expert,
             "symbol": job.symbol,
+            "requested_symbol": symbol.requested,
+            "resolved_symbol": symbol.resolved,
+            "symbol_resolution": symbol.resolution,
             "timeframe": job.timeframe,
             "launched_at": job.launched_at,
             "timeout_seconds": job.timeout_seconds,
@@ -551,26 +525,22 @@ pub async fn handle_run_rolling_backtest(config: &Config, args: &Value) -> Resul
     };
 
     let requested_symbol = args.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
-    let default_symbol = config.backtest_symbol.as_deref().unwrap_or("");
-    let symbol = if requested_symbol.is_empty() {
-        Config::resolve_symbol(default_symbol, &preflight.available_symbols)
-            .map(str::to_string)
-            .or_else(|| preflight.available_symbols.first().cloned())
-            .unwrap_or_default()
-    } else {
-        Config::resolve_symbol(requested_symbol, &preflight.available_symbols)
-            .map(str::to_string)
-            .unwrap_or_default()
+    let active_server = preflight.server.as_deref().unwrap_or("unknown");
+    let active_login = preflight
+        .account
+        .as_ref()
+        .map(|account| account.login.as_str())
+        .unwrap_or("unknown");
+    let symbol = match resolve_tester_symbol(
+        config,
+        requested_symbol,
+        &preflight.available_symbols,
+        active_server,
+        active_login,
+    ) {
+        Ok(symbol) => symbol,
+        Err(response) => return Ok(response),
     };
-    if symbol.is_empty() {
-        return Ok(json!({
-            "content": [{ "type": "text", "text": format!(
-                "Symbol '{}' has no tester data for the active account.",
-                if requested_symbol.is_empty() { default_symbol } else { requested_symbol }
-            ) }],
-            "isError": true
-        }));
-    }
     let timeframe = args
         .get("timeframe")
         .and_then(|v| v.as_str())
@@ -624,7 +594,7 @@ pub async fn handle_run_rolling_backtest(config: &Config, args: &Value) -> Resul
         report_id: report_id.clone(),
         report_dir: report_dir.to_string_lossy().to_string(),
         expert: expert.to_string(),
-        symbol: symbol.clone(),
+        symbol: symbol.resolved.clone(),
         timeframe: timeframe.clone(),
         mt5_pid: None,
         expected_report_path: String::new(),
@@ -647,7 +617,7 @@ pub async fn handle_run_rolling_backtest(config: &Config, args: &Value) -> Resul
     let config_clone = config.clone();
     let report_dir_clone = report_dir.clone();
     let expert_clone = expert.to_string();
-    let symbol_clone = symbol;
+    let symbol_clone = symbol.resolved.clone();
     let timeframe_clone = timeframe;
     let set_file_clone = set_file;
     let weeks_clone = weeks.clone();
@@ -685,6 +655,9 @@ pub async fn handle_run_rolling_backtest(config: &Config, args: &Value) -> Resul
             "report_id": report_id,
             "report_dir": report_dir.to_string_lossy(),
             "expert": expert,
+            "requested_symbol": symbol.requested,
+            "resolved_symbol": symbol.resolved,
+            "symbol_resolution": symbol.resolution,
             "weeks": weeks.iter().map(|(l, f, t)| json!({"label": l, "from_date": f, "to_date": t})).collect::<Vec<_>>(),
             "execution_mode": "async",
             "status_tool": "get_backtest_status",
@@ -1211,7 +1184,7 @@ pub async fn handle_cache_status(config: &Config) -> Result<Value> {
 }
 
 pub async fn handle_clean_cache(config: &Config, args: &Value) -> Result<Value> {
-    let symbol = args.get("symbol").and_then(|v| v.as_str());
+    let requested_symbol = args.get("symbol").and_then(|v| v.as_str());
     let dry_run = args
         .get("dry_run")
         .and_then(|v| v.as_bool())
@@ -1224,8 +1197,49 @@ pub async fn handle_clean_cache(config: &Config, args: &Value) -> Result<Value> 
         .filter(|p| p.exists());
 
     let mut bytes_freed: u64 = 0;
+    let mut resolved_symbol = None;
+    let mut symbol_resolution = json!({ "status": "not_requested" });
 
     if let Some(dir) = cache_dir {
+        if let Some(requested) = requested_symbol {
+            let mut cached_symbols = walkdir::WalkDir::new(dir)
+                .into_iter()
+                .filter_map(|entry| entry.ok())
+                .filter_map(|entry| cache_symbol(entry.path()))
+                .collect::<Vec<_>>();
+            cached_symbols.sort();
+            cached_symbols.dedup();
+            let matched = resolve_symbol(requested, &cached_symbols);
+            symbol_resolution = match &matched {
+                SymbolMatch::Exact(_) => json!({ "status": "exact" }),
+                SymbolMatch::Alias { kind, .. } => {
+                    json!({ "status": "alias", "method": kind })
+                }
+                SymbolMatch::Ambiguous(candidates) => {
+                    json!({ "status": "ambiguous", "candidates": candidates })
+                }
+                SymbolMatch::NoMatch => json!({ "status": "no_match" }),
+            };
+            if matches!(matched, SymbolMatch::Ambiguous(_)) {
+                return Ok(json!({
+                    "content": [{ "type": "text", "text": json!({
+                        "success": false,
+                        "code": "symbol_ambiguous",
+                        "error": format!("Cache symbol '{}' is ambiguous; no files were deleted.", requested),
+                        "requested_symbol": requested,
+                        "resolved_symbol": null,
+                        "symbol_resolution": symbol_resolution,
+                        "candidates": matched.candidates(),
+                        "bytes_freed": 0,
+                        "dry_run": dry_run,
+                        "hint": "Retry with one exact cache symbol from candidates."
+                    }).to_string() }],
+                    "isError": true
+                }));
+            }
+            resolved_symbol = matched.resolved().map(str::to_string);
+        }
+
         for entry in walkdir::WalkDir::new(dir) {
             if let Ok(entry) = entry {
                 let path = entry.path();
@@ -1234,8 +1248,11 @@ pub async fn handle_clean_cache(config: &Config, args: &Value) -> Result<Value> 
                     .and_then(|ext| ext.to_str())
                     .map(|ext| ext.eq_ignore_ascii_case("tst"))
                     .unwrap_or(false);
-                let symbol_matches = symbol
-                    .map(|requested| {
+                let symbol_matches = requested_symbol
+                    .map(|_| {
+                        let Some(requested) = resolved_symbol.as_deref() else {
+                            return false;
+                        };
                         cache_symbol(path)
                             .map(|actual| actual.eq_ignore_ascii_case(requested))
                             .unwrap_or(false)
@@ -1257,7 +1274,10 @@ pub async fn handle_clean_cache(config: &Config, args: &Value) -> Result<Value> 
         "content": [{ "type": "text", "text": json!({
             "success": true,
             "bytes_freed": bytes_freed,
-            "symbol": symbol,
+            "symbol": requested_symbol,
+            "requested_symbol": requested_symbol,
+            "resolved_symbol": resolved_symbol,
+            "symbol_resolution": symbol_resolution,
             "dry_run": dry_run
         }).to_string() }],
         "isError": false
@@ -1271,4 +1291,62 @@ fn cache_symbol(path: &Path) -> Option<String> {
         return None;
     }
     Some(parts[parts.len() - 5].to_string())
+}
+
+#[cfg(test)]
+mod symbol_preflight_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn payload(response: &Value) -> Value {
+        serde_json::from_str(response["content"][0]["text"].as_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn tester_preflight_rejects_ambiguous_affixes() {
+        let config = Config::default();
+        let result = resolve_tester_symbol(
+            &config,
+            "EURUSD",
+            &["EURUSDm".into(), "EURUSDz".into()],
+            "Demo-Server",
+            "123",
+        )
+        .expect_err("ambiguity must not select a symbol");
+        let body = payload(&result);
+        assert_eq!(body["code"], "symbol_ambiguous");
+        assert_eq!(body["candidates"], json!(["EURUSDm", "EURUSDz"]));
+        assert_eq!(body["active_server"], "Demo-Server");
+    }
+
+    #[test]
+    fn tester_preflight_reports_no_history_without_guessing() {
+        let config = Config::default();
+        let result =
+            resolve_tester_symbol(&config, "EURUSD", &["GBPUSD".into()], "Demo-Server", "123")
+                .expect_err("missing history must fail");
+        let body = payload(&result);
+        assert_eq!(body["code"], "symbol_not_in_tester_history");
+        assert_eq!(body["broker_status"], "unknown");
+    }
+
+    #[tokio::test]
+    async fn clean_cache_ambiguity_never_deletes_files() {
+        let root = tempdir().unwrap();
+        let first = root.path().join("a.EURUSDm.c.d.e.f.tst");
+        let second = root.path().join("a.EURUSDz.c.d.e.f.tst");
+        fs::write(&first, b"one").unwrap();
+        fs::write(&second, b"two").unwrap();
+
+        let mut config = Config::default();
+        config.tester_cache_dir = Some(root.path().to_string_lossy().into_owned());
+        let response = handle_clean_cache(&config, &json!({ "symbol": "EURUSD" }))
+            .await
+            .unwrap();
+        let body = payload(&response);
+        assert_eq!(response["isError"], true);
+        assert_eq!(body["code"], "symbol_ambiguous");
+        assert!(first.exists());
+        assert!(second.exists());
+    }
 }

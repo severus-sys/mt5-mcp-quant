@@ -1,4 +1,4 @@
-use crate::models::Config;
+use crate::models::{resolve_symbol, Config, SymbolMatch};
 use crate::optimization::{OptimizationParams, OptimizationParser, OptimizationRunner};
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -25,14 +25,57 @@ pub async fn handle_run_optimization(config: &Config, args: &Value) -> Result<Va
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("to_date is required"))?;
 
+    let requested_symbol = args
+        .get("symbol")
+        .and_then(|value| value.as_str())
+        .unwrap_or("XAUUSD")
+        .trim();
+    let account = config.current_account();
+    let active_server = account
+        .as_ref()
+        .map(|value| value.server.as_str())
+        .unwrap_or("unknown");
+    let available_symbols = config.discover_symbols_for_active_account();
+    let symbol_match = resolve_symbol(requested_symbol, &available_symbols);
+    let symbol_resolution = match &symbol_match {
+        SymbolMatch::Exact(_) => json!({ "status": "exact" }),
+        SymbolMatch::Alias { kind, .. } => json!({ "status": "alias", "method": kind }),
+        SymbolMatch::Ambiguous(candidates) => {
+            json!({ "status": "ambiguous", "candidates": candidates })
+        }
+        SymbolMatch::NoMatch => json!({ "status": "no_match" }),
+    };
+    let Some(resolved_symbol) = symbol_match.resolved().map(str::to_string) else {
+        let code = if matches!(symbol_match, SymbolMatch::Ambiguous(_)) {
+            "symbol_ambiguous"
+        } else {
+            "symbol_not_in_tester_history"
+        };
+        return Ok(json!({
+            "content": [{ "type": "text", "text": json!({
+                "error": format!("Optimization symbol '{}' could not be resolved against tester history.", requested_symbol),
+                "code": code,
+                "requested_symbol": requested_symbol,
+                "resolved_symbol": null,
+                "symbol_resolution": symbol_resolution,
+                "candidates": symbol_match.candidates(),
+                "available_symbols": available_symbols,
+                "active_server": active_server,
+                "broker_status": "unknown",
+                "hint": if code == "symbol_ambiguous" {
+                    "Pass one exact symbol from candidates; no symbol was selected automatically."
+                } else {
+                    "Download this symbol's Strategy Tester history, then retry."
+                },
+            }).to_string() }],
+            "isError": true
+        }));
+    };
+
     let params = OptimizationParams {
         expert: expert.to_string(),
         set_file: set_file.to_string(),
-        symbol: args
-            .get("symbol")
-            .and_then(|v| v.as_str())
-            .unwrap_or("XAUUSD")
-            .to_string(),
+        symbol: resolved_symbol.clone(),
         from_date: from_date.to_string(),
         to_date: to_date.to_string(),
         deposit: args
@@ -66,6 +109,9 @@ pub async fn handle_run_optimization(config: &Config, args: &Value) -> Result<Va
             "log_file": result.log_file.to_string_lossy(),
             "combinations": result.combinations,
             "message": result.message,
+            "requested_symbol": requested_symbol,
+            "resolved_symbol": resolved_symbol,
+            "symbol_resolution": symbol_resolution,
         }).to_string() }],
         "isError": false
     }))
