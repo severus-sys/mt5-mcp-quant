@@ -1,5 +1,6 @@
-use crate::models::{resolve_symbol, Config, SymbolMatch};
+use crate::models::Config;
 use crate::optimization::{OptimizationParams, OptimizationParser, OptimizationRunner};
+use crate::tools::handlers::symbols::resolve_tester_symbol;
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::fs;
@@ -35,42 +36,25 @@ pub async fn handle_run_optimization(config: &Config, args: &Value) -> Result<Va
         .as_ref()
         .map(|value| value.server.as_str())
         .unwrap_or("unknown");
+    let active_login = account
+        .as_ref()
+        .map(|value| value.login.as_str())
+        .unwrap_or("unknown");
     let available_symbols = config.discover_symbols_for_active_account();
-    let symbol_match = resolve_symbol(requested_symbol, &available_symbols);
-    let symbol_resolution = match &symbol_match {
-        SymbolMatch::Exact(_) => json!({ "status": "exact" }),
-        SymbolMatch::Alias { kind, .. } => json!({ "status": "alias", "method": kind }),
-        SymbolMatch::Ambiguous(candidates) => {
-            json!({ "status": "ambiguous", "candidates": candidates })
-        }
-        SymbolMatch::NoMatch => json!({ "status": "no_match" }),
+    let symbol = match resolve_tester_symbol(
+        config,
+        requested_symbol,
+        &available_symbols,
+        active_server,
+        active_login,
+    )
+    .await
+    {
+        Ok(symbol) => symbol,
+        Err(response) => return Ok(response),
     };
-    let Some(resolved_symbol) = symbol_match.resolved().map(str::to_string) else {
-        let code = if matches!(symbol_match, SymbolMatch::Ambiguous(_)) {
-            "symbol_ambiguous"
-        } else {
-            "symbol_not_in_tester_history"
-        };
-        return Ok(json!({
-            "content": [{ "type": "text", "text": json!({
-                "error": format!("Optimization symbol '{}' could not be resolved against tester history.", requested_symbol),
-                "code": code,
-                "requested_symbol": requested_symbol,
-                "resolved_symbol": null,
-                "symbol_resolution": symbol_resolution,
-                "candidates": symbol_match.candidates(),
-                "available_symbols": available_symbols,
-                "active_server": active_server,
-                "broker_status": "unknown",
-                "hint": if code == "symbol_ambiguous" {
-                    "Pass one exact symbol from candidates; no symbol was selected automatically."
-                } else {
-                    "Download this symbol's Strategy Tester history, then retry."
-                },
-            }).to_string() }],
-            "isError": true
-        }));
-    };
+    let resolved_symbol = symbol.resolved.clone();
+    let symbol_resolution = symbol.resolution;
 
     let params = OptimizationParams {
         expert: expert.to_string(),

@@ -11,9 +11,11 @@ type NotificationCallback = Arc<dyn Fn(&str, serde_json::Value) + Send + Sync>;
 mod analysis;
 mod backtest;
 mod experts;
+mod market_watch;
 mod optimization;
 mod reports;
 mod setfiles;
+mod symbols;
 mod system;
 mod utility;
 
@@ -62,6 +64,9 @@ impl ToolHandler {
             "get_active_account" => system::handle_get_active_account(&self.config).await,
             "check_update" => system::handle_check_update(&self.config).await,
             "update" => system::handle_update(&self.config, args).await,
+            "ensure_market_watch_symbol" => {
+                market_watch::handle_ensure_market_watch_symbol(&self.config, args).await
+            }
 
             // Expert/Indicator/Script handlers
             "list_experts" => experts::handle_list_experts(&self.config, args).await,

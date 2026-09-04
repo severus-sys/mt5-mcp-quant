@@ -1,5 +1,6 @@
-use crate::models::{resolve_symbol, Config, SymbolMatch};
+use crate::models::Config;
 use crate::storage::ReportDb;
+use crate::tools::handlers::symbols::resolve_tester_symbol;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::fs;
@@ -129,45 +130,21 @@ pub async fn handle_check_symbol_data_status(config: &Config, args: &Value) -> R
         .as_ref()
         .map(|a| a.server.as_str())
         .unwrap_or("");
+    let login = current_account
+        .as_ref()
+        .map(|a| a.login.as_str())
+        .unwrap_or("unknown");
 
     let available_symbols = config.discover_symbols_for_active_account();
-    let symbol_match = resolve_symbol(requested_symbol, &available_symbols);
-    let symbol_resolution = match &symbol_match {
-        SymbolMatch::Exact(_) => json!({ "status": "exact" }),
-        SymbolMatch::Alias { kind, .. } => json!({ "status": "alias", "method": kind }),
-        SymbolMatch::Ambiguous(candidates) => {
-            json!({ "status": "ambiguous", "candidates": candidates })
-        }
-        SymbolMatch::NoMatch => json!({ "status": "no_match" }),
-    };
-    let Some(symbol) = symbol_match.resolved().map(str::to_string) else {
-        let code = if matches!(symbol_match, SymbolMatch::Ambiguous(_)) {
-            "symbol_ambiguous"
-        } else {
-            "symbol_not_in_tester_history"
+    let operational_symbol =
+        match resolve_tester_symbol(config, requested_symbol, &available_symbols, server, login)
+            .await
+        {
+            Ok(symbol) => symbol,
+            Err(response) => return Ok(response),
         };
-        return Ok(json!({
-            "content": [{ "type": "text", "text": json!({
-                "symbol": requested_symbol,
-                "requested_symbol": requested_symbol,
-                "resolved_symbol": null,
-                "symbol_resolution": symbol_resolution,
-                "has_sufficient_data": false,
-                "error": format!("Symbol '{}' is not uniquely available in tester history for server '{}'.", requested_symbol, server),
-                "code": code,
-                "candidates": symbol_match.candidates(),
-                "available_symbols": available_symbols,
-                "active_server": server,
-                "broker_status": "unknown",
-                "suggestion": if code == "symbol_ambiguous" {
-                    "Retry with one exact symbol from candidates."
-                } else {
-                    "Download tester history for the broker's exact symbol, then retry."
-                }
-            }).to_string() }],
-            "isError": false
-        }));
-    };
+    let symbol = operational_symbol.resolved;
+    let symbol_resolution = operational_symbol.resolution;
 
     // Try to find hcc files to determine actual data range
     let mt5_dir = config.mt5_dir();

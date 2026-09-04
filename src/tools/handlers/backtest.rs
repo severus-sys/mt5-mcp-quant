@@ -1,6 +1,7 @@
 use crate::models::report::BacktestJob;
 use crate::models::{resolve_symbol, Config, SymbolMatch};
 use crate::pipeline::backtest::{BacktestParams, BacktestPipeline};
+use crate::tools::handlers::symbols::resolve_tester_symbol;
 use anyhow::Result;
 use chrono::Datelike;
 use serde_json::{json, Value};
@@ -15,89 +16,6 @@ struct BacktestPreflight {
     available_symbols: Vec<String>,
     ea_exists: bool,
     server: Option<String>,
-}
-
-#[derive(Debug)]
-struct OperationalSymbol {
-    requested: String,
-    resolved: String,
-    resolution: Value,
-}
-
-fn resolve_tester_symbol(
-    config: &Config,
-    supplied: &str,
-    available: &[String],
-    server: &str,
-    login: &str,
-) -> std::result::Result<OperationalSymbol, Value> {
-    let effective = if supplied.trim().is_empty() {
-        config.backtest_symbol.as_deref().unwrap_or("").trim()
-    } else {
-        supplied.trim()
-    };
-
-    if effective.is_empty() {
-        if let Some(first) = available.first() {
-            return Ok(OperationalSymbol {
-                requested: String::new(),
-                resolved: first.clone(),
-                resolution: json!({ "status": "default", "method": "first_tester_symbol" }),
-            });
-        }
-    }
-
-    let matched = resolve_symbol(effective, available);
-    let resolution = match &matched {
-        SymbolMatch::Exact(_) => json!({ "status": "exact" }),
-        SymbolMatch::Alias { kind, .. } => json!({ "status": "alias", "method": kind }),
-        SymbolMatch::Ambiguous(candidates) => json!({
-            "status": "ambiguous",
-            "candidates": candidates,
-        }),
-        SymbolMatch::NoMatch => json!({ "status": "no_match" }),
-    };
-
-    if let Some(resolved) = matched.resolved() {
-        return Ok(OperationalSymbol {
-            requested: effective.to_string(),
-            resolved: resolved.to_string(),
-            resolution,
-        });
-    }
-
-    let code = if matches!(matched, SymbolMatch::Ambiguous(_)) {
-        "symbol_ambiguous"
-    } else {
-        "symbol_not_in_tester_history"
-    };
-    let hint = if matches!(matched, SymbolMatch::Ambiguous(_)) {
-        "Pass one exact broker symbol from candidates. No symbol was selected automatically."
-    } else {
-        "Download this symbol's history in MT5 Strategy Tester, then retry. Market Watch and tester history are separate catalogs."
-    };
-
-    Err(json!({
-        "content": [{ "type": "text", "text": json!({
-            "error": if matches!(matched, SymbolMatch::Ambiguous(_)) {
-                format!("Symbol '{}' matches more than one tester symbol.", effective)
-            } else {
-                format!("Symbol '{}' has no tester history on server '{}'.", effective, server)
-            },
-            "code": code,
-            "pre_check": code,
-            "requested_symbol": effective,
-            "resolved_symbol": null,
-            "symbol_resolution": resolution,
-            "candidates": matched.candidates(),
-            "available_symbols": available,
-            "active_server": server,
-            "account": { "login": login, "server": server },
-            "broker_status": "unknown",
-            "hint": hint,
-        }).to_string() }],
-        "isError": true
-    }))
 }
 
 impl BacktestPreflight {
@@ -167,7 +85,9 @@ pub async fn handle_run_backtest(config: &Config, args: &Value) -> Result<Value>
         &preflight.available_symbols,
         active_server,
         active_login,
-    ) {
+    )
+    .await
+    {
         Ok(symbol) => symbol,
         Err(response) => return Ok(response),
     };
@@ -326,7 +246,9 @@ pub async fn handle_launch_backtest(
         &preflight.available_symbols,
         active_server,
         active_login,
-    ) {
+    )
+    .await
+    {
         Ok(symbol) => symbol,
         Err(response) => return Ok(response),
     };
@@ -537,7 +459,9 @@ pub async fn handle_run_rolling_backtest(config: &Config, args: &Value) -> Resul
         &preflight.available_symbols,
         active_server,
         active_login,
-    ) {
+    )
+    .await
+    {
         Ok(symbol) => symbol,
         Err(response) => return Ok(response),
     };
@@ -1302,8 +1226,8 @@ mod symbol_preflight_tests {
         serde_json::from_str(response["content"][0]["text"].as_str().unwrap()).unwrap()
     }
 
-    #[test]
-    fn tester_preflight_rejects_ambiguous_affixes() {
+    #[tokio::test]
+    async fn tester_preflight_rejects_ambiguous_affixes() {
         let config = Config::default();
         let result = resolve_tester_symbol(
             &config,
@@ -1312,6 +1236,7 @@ mod symbol_preflight_tests {
             "Demo-Server",
             "123",
         )
+        .await
         .expect_err("ambiguity must not select a symbol");
         let body = payload(&result);
         assert_eq!(body["code"], "symbol_ambiguous");
@@ -1319,11 +1244,12 @@ mod symbol_preflight_tests {
         assert_eq!(body["active_server"], "Demo-Server");
     }
 
-    #[test]
-    fn tester_preflight_reports_no_history_without_guessing() {
+    #[tokio::test]
+    async fn tester_preflight_reports_no_history_without_guessing() {
         let config = Config::default();
         let result =
             resolve_tester_symbol(&config, "EURUSD", &["GBPUSD".into()], "Demo-Server", "123")
+                .await
                 .expect_err("missing history must fail");
         let body = payload(&result);
         assert_eq!(body["code"], "symbol_not_in_tester_history");
