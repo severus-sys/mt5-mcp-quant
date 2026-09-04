@@ -5,7 +5,7 @@
 #property description "Allowlisted FILE_COMMON bridge for Market Watch and calendar export"
 
 #define PROTOCOL_VERSION "1"
-#define SERVICE_VERSION  "1.0.0"
+#define SERVICE_VERSION  "1.0.1"
 #define ROOT_PREFIX      "mt5-mcp-quant\\bridge\\v1\\"
 
 string g_instance_id;

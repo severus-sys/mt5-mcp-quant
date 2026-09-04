@@ -1,4 +1,4 @@
-use crate::bridge::{validate_id, BridgeClient, BridgeHealthState};
+use crate::bridge::{validate_id, BridgeClient, BridgeHealthState, BridgeResponse};
 use crate::compile::MqlCompiler;
 use crate::models::Config;
 use crate::utils::atomic_write;
@@ -7,15 +7,16 @@ use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 const PROVIDER_SOURCE: &str = include_str!("../../../mql/CalendarStaticProvider.mqh");
 const CSV_SCHEMA_VERSION: &str = "1";
 static CALENDAR_STATE_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+static ACTIVE_EXPORTS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 const CSV_HEADER: [&str; 28] = [
     "schema_version",
     "value_id",
@@ -244,6 +245,46 @@ fn fingerprint(
     ))
 }
 
+fn export_is_active(job_id: &str) -> bool {
+    ACTIVE_EXPORTS
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains(job_id)
+}
+
+fn mark_export_failed(job_id: &str, error: &anyhow::Error) {
+    if let Ok(mut failed) = read_job(job_id) {
+        if failed.state != CalendarJobState::Running {
+            return;
+        }
+        failed.state = CalendarJobState::Failed;
+        failed.updated_at = chrono::Utc::now().to_rfc3339();
+        failed.error_code = Some("calendar_export_failed".into());
+        failed.error_message = Some(error.to_string());
+        let _ = write_job(&failed);
+    }
+}
+
+fn spawn_export_job(config: Config, job_id: String) {
+    ACTIVE_EXPORTS
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(job_id.clone());
+    tokio::spawn(async move {
+        let result = run_export_job(config, &job_id).await;
+        ACTIVE_EXPORTS
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&job_id);
+        if let Err(error) = result {
+            mark_export_failed(&job_id, &error);
+        }
+    });
+}
+
 pub async fn handle_prepare_calendar_export(config: &Config, args: &Value) -> Result<Value> {
     let _state_guard = CALENDAR_STATE_LOCK
         .get_or_init(|| tokio::sync::Mutex::new(()))
@@ -284,43 +325,96 @@ pub async fn handle_prepare_calendar_export(config: &Config, args: &Value) -> Re
         .unwrap_or(false);
     if job_path(&job_id).is_file() && !overwrite {
         let mut existing = read_job(&job_id)?;
-        let bridge = BridgeClient::new(config).ok();
-        let can_start = existing.state == CalendarJobState::Prepared
-            && bridge
-                .as_ref()
-                .map(|value| {
-                    let health = value.health();
-                    health.state == BridgeHealthState::Ready && health.connected != Some(false)
-                })
-                .unwrap_or(false);
-        if can_start {
-            existing.state = CalendarJobState::Running;
-            existing.progress_percent = 1;
-            existing.terminal_instance_id =
-                bridge.as_ref().map(|value| value.instance_id().to_string());
+        if existing.state == CalendarJobState::Running && !export_is_active(&job_id) {
+            if let Err(error) = reconcile_running_job(config, &job_id) {
+                mark_export_failed(&job_id, &error);
+            }
+            existing = read_job(&job_id)?;
+        }
+
+        let mut can_start = false;
+        let mut installation = None;
+        let mut provider_path = None;
+        let mut bridge_health = None;
+        let mut bridge_instance_id = None;
+        if existing.state == CalendarJobState::Prepared {
+            let bridge = match BridgeClient::new(config) {
+                Ok(bridge) => bridge,
+                Err(error) => {
+                    existing.error_code = Some("bridge_not_configured".into());
+                    existing.error_message = Some(error.to_string());
+                    existing.updated_at = chrono::Utc::now().to_rfc3339();
+                    write_job(&existing)?;
+                    return Ok(success(json!({
+                        "success": true,
+                        "idempotent": true,
+                        "job": existing,
+                        "auto_started": false,
+                        "inspect_with": { "tool": "inspect_calendar_export", "job_id": job_id }
+                    })));
+                }
+            };
+            bridge_instance_id = Some(bridge.instance_id().to_string());
+            installation = match bridge.ensure_installed().await {
+                Ok(result) => Some(result),
+                Err(error) => {
+                    existing.error_code = Some("bridge_install_failed".into());
+                    existing.error_message = Some(error.to_string());
+                    existing.updated_at = chrono::Utc::now().to_rfc3339();
+                    write_job(&existing)?;
+                    return Ok(success(json!({
+                        "success": true,
+                        "idempotent": true,
+                        "job": existing,
+                        "auto_started": false,
+                        "start_service_once": "Fix MetaEditor compilation errors, then retry.",
+                        "inspect_with": { "tool": "inspect_calendar_export", "job_id": job_id }
+                    })));
+                }
+            };
+            provider_path = match MqlCompiler::new(config.clone())
+                .deploy_include("CalendarStaticProvider.mqh", PROVIDER_SOURCE.as_bytes())
+            {
+                Ok(path) => Some(path),
+                Err(error) => {
+                    existing.error_code = Some("calendar_provider_install_failed".into());
+                    existing.error_message = Some(error.to_string());
+                    existing.updated_at = chrono::Utc::now().to_rfc3339();
+                    write_job(&existing)?;
+                    return Ok(success(json!({
+                        "success": true,
+                        "idempotent": true,
+                        "job": existing,
+                        "auto_started": false,
+                        "installation": installation,
+                        "inspect_with": { "tool": "inspect_calendar_export", "job_id": job_id }
+                    })));
+                }
+            };
+            let health = bridge.health();
+            can_start = health.state == BridgeHealthState::Ready && health.connected != Some(false);
+            bridge_health = Some(health);
             existing.error_code = None;
             existing.error_message = None;
             existing.updated_at = chrono::Utc::now().to_rfc3339();
-            write_job(&existing)?;
-            let background_config = config.clone();
-            let background_job_id = job_id.clone();
-            tokio::spawn(async move {
-                if let Err(error) = run_export_job(background_config, &background_job_id).await {
-                    if let Ok(mut failed) = read_job(&background_job_id) {
-                        failed.state = CalendarJobState::Failed;
-                        failed.updated_at = chrono::Utc::now().to_rfc3339();
-                        failed.error_code = Some("calendar_export_failed".into());
-                        failed.error_message = Some(error.to_string());
-                        let _ = write_job(&failed);
-                    }
-                }
-            });
+        }
+        if can_start {
+            existing.state = CalendarJobState::Running;
+            existing.progress_percent = 1;
+            existing.terminal_instance_id = bridge_instance_id;
+        }
+        write_job(&existing)?;
+        if can_start {
+            spawn_export_job(config.clone(), job_id.clone());
         }
         return Ok(success(json!({
             "success": true,
             "idempotent": true,
             "job": existing,
             "auto_started": can_start,
+            "installation": installation,
+            "provider_path": provider_path,
+            "bridge": bridge_health,
             "inspect_with": { "tool": "inspect_calendar_export", "job_id": job_id }
         })));
     }
@@ -393,19 +487,7 @@ pub async fn handle_prepare_calendar_export(config: &Config, args: &Value) -> Re
         job.terminal_instance_id = Some(bridge.instance_id().to_string());
         job.updated_at = chrono::Utc::now().to_rfc3339();
         write_job(&job)?;
-        let config = config.clone();
-        let background_job_id = job_id.clone();
-        tokio::spawn(async move {
-            if let Err(error) = run_export_job(config, &background_job_id).await {
-                if let Ok(mut failed) = read_job(&background_job_id) {
-                    failed.state = CalendarJobState::Failed;
-                    failed.updated_at = chrono::Utc::now().to_rfc3339();
-                    failed.error_code = Some("calendar_export_failed".into());
-                    failed.error_message = Some(error.to_string());
-                    let _ = write_job(&failed);
-                }
-            }
-        });
+        spawn_export_job(config.clone(), job_id.clone());
         Ok(success(json!({
             "success": true,
             "job": job,
@@ -452,9 +534,19 @@ async fn run_export_job(config: Config, job_id: &str) -> Result<()> {
         ("to_epoch".into(), job.filters.to_server_epoch.to_string()),
     ]);
     let response = bridge
-        .request("export_calendar", &fields, Duration::from_secs(7_200))
+        .request_with_id(
+            "export_calendar",
+            &fields,
+            Duration::from_secs(7_200),
+            job_id,
+        )
         .await?;
+    finalize_export_response(&config, job_id, response)
+}
+
+fn finalize_export_response(config: &Config, job_id: &str, response: BridgeResponse) -> Result<()> {
     response.require_ok()?;
+    let mut job = read_job(job_id)?;
     job.state = CalendarJobState::Complete;
     job.progress_percent = 95;
     job.terminal_instance_id = response.get("instance_id").map(str::to_string);
@@ -504,6 +596,25 @@ async fn run_export_job(config: Config, job_id: &str) -> Result<()> {
     };
     job.updated_at = chrono::Utc::now().to_rfc3339();
     write_job(&job)
+}
+
+fn reconcile_running_job(config: &Config, job_id: &str) -> Result<bool> {
+    if export_is_active(job_id) {
+        return Ok(false);
+    }
+    let bridge = BridgeClient::new(config)?;
+    let response = match bridge.take_response(job_id)? {
+        Some(response) => Some(response),
+        None => bridge.take_calendar_response(job_id)?,
+    };
+    let Some(response) = response else {
+        return Ok(false);
+    };
+    if let Err(error) = finalize_export_response(config, job_id, response) {
+        mark_export_failed(job_id, &error);
+        return Err(error);
+    }
+    Ok(true)
 }
 
 struct ValidationResult {
@@ -587,6 +698,12 @@ pub async fn handle_inspect_calendar_export(config: &Config, args: &Value) -> Re
             })))
         }
     };
+    if job.state == CalendarJobState::Running && !export_is_active(job_id) {
+        if let Err(error) = reconcile_running_job(config, job_id) {
+            mark_export_failed(job_id, &error);
+        }
+        job = read_job(job_id)?;
+    }
     if job.state == CalendarJobState::Running {
         if let Some(common) = config.terminal_common_files_dir() {
             let progress = common
@@ -666,7 +783,7 @@ pub async fn handle_prepare_calendar_backtest_dataset(
     if !job.validation_valid
         || !matches!(
             job.state,
-            CalendarJobState::Validated | CalendarJobState::Partial
+            CalendarJobState::Validated | CalendarJobState::Partial | CalendarJobState::Ready
         )
     {
         return Ok(tool_error(json!({
@@ -773,25 +890,47 @@ pub async fn handle_prepare_calendar_backtest_dataset(
     );
     fs::write(staging.join("manifest.kv"), manifest_kv)?;
 
-    if target.exists() {
+    let provider_path = match MqlCompiler::new(config.clone())
+        .deploy_include("CalendarStaticProvider.mqh", PROVIDER_SOURCE.as_bytes())
+    {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error);
+        }
+    };
+
+    let backup = if target.exists() {
         let backup = datasets_root.join(format!(".old-{}", uuid::Uuid::new_v4().simple()));
         fs::rename(&target, &backup)?;
         if let Err(error) = fs::rename(&staging, &target) {
             let _ = fs::rename(&backup, &target);
+            let _ = fs::remove_dir_all(&staging);
             return Err(error.into());
         }
-        let _ = fs::remove_dir_all(backup);
+        Some(backup)
     } else {
-        fs::rename(&staging, &target)?;
-    }
-    MqlCompiler::new(config.clone())
-        .deploy_include("CalendarStaticProvider.mqh", PROVIDER_SOURCE.as_bytes())?;
+        if let Err(error) = fs::rename(&staging, &target) {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error.into());
+        }
+        None
+    };
     job.state = CalendarJobState::Ready;
     if !job.datasets.iter().any(|value| value == dataset_id) {
         job.datasets.push(dataset_id.to_string());
     }
     job.updated_at = chrono::Utc::now().to_rfc3339();
-    write_job(&job)?;
+    if let Err(error) = write_job(&job) {
+        let _ = fs::remove_dir_all(&target);
+        if let Some(backup) = &backup {
+            let _ = fs::rename(backup, &target);
+        }
+        return Err(error);
+    }
+    if let Some(backup) = backup {
+        let _ = fs::remove_dir_all(backup);
+    }
 
     Ok(success(json!({
         "success": true,
@@ -804,6 +943,7 @@ pub async fn handle_prepare_calendar_backtest_dataset(
         "completeness": job.coverage.completeness,
         "provider": {
             "include": "<MT5-MCP-Quant/CalendarStaticProvider.mqh>",
+            "path": provider_path,
             "class": "CMt5MqCalendarStaticProvider",
             "load": format!("Load(\"{}\")", dataset_id),
         }
@@ -814,6 +954,117 @@ pub async fn handle_prepare_calendar_backtest_dataset(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    struct StoredJobGuard {
+        job_id: String,
+    }
+
+    impl Drop for StoredJobGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(jobs_root().join(&self.job_id));
+        }
+    }
+
+    fn test_config(root: &Path) -> Config {
+        let mut config = Config::default();
+        config.data_dir = Some(root.join("terminal").to_string_lossy().into_owned());
+        config.services_dir = Some(root.join("services").to_string_lossy().into_owned());
+        config.include_dir = Some(root.join("include").to_string_lossy().into_owned());
+        config.terminal_common_data_dir = Some(root.join("common").to_string_lossy().into_owned());
+        config
+    }
+
+    fn valid_calendar_csv() -> Vec<u8> {
+        let row = [
+            "1",
+            "10",
+            "20",
+            "1704067200",
+            "2024-01-01T00:00:00",
+            "0",
+            "",
+            "0",
+            "840",
+            "US",
+            "United States",
+            "USD",
+            "CALENDAR_TYPE_INDICATOR",
+            "CALENDAR_SECTOR_JOBS",
+            "CALENDAR_FREQUENCY_MONTH",
+            "CALENDAR_TIMEMODE_DATETIME",
+            "CALENDAR_UNIT_PERCENT",
+            "CALENDAR_IMPORTANCE_HIGH",
+            "CALENDAR_MULTIPLIER_NONE",
+            "1",
+            "NFP",
+            "Payrolls, total",
+            "https://example.test",
+            "CALENDAR_IMPACT_POSITIVE",
+            "0",
+            "",
+            "-1000000",
+            "2000000",
+        ];
+        let mut writer = csv::Writer::from_writer(Vec::new());
+        writer.write_record(CSV_HEADER).unwrap();
+        writer.write_record(row).unwrap();
+        writer.into_inner().unwrap()
+    }
+
+    fn stored_job(
+        root: &Path,
+        config: &Config,
+        job_id: String,
+        state: CalendarJobState,
+        validation_valid: bool,
+    ) -> (StoredJobGuard, CalendarJob) {
+        let export_path = root.join(format!("{}-export.csv", job_id));
+        let bytes = valid_calendar_csv();
+        fs::write(&export_path, &bytes).unwrap();
+        let filters = normalize_filters(&json!({
+            "currencies": ["USD"],
+            "importance": ["high"],
+            "from": "2024-01-01T00:00:00",
+            "to": "2024-02-01T00:00:00"
+        }))
+        .unwrap();
+        let bridge = BridgeClient::new(config).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let job = CalendarJob {
+            schema_version: 1,
+            job_id: job_id.clone(),
+            fingerprint: "fixture-fingerprint".into(),
+            state,
+            created_at: now.clone(),
+            updated_at: now,
+            filters,
+            broker_server: Some("Broker-Demo".into()),
+            account_login: Some("123456".into()),
+            terminal_instance_id: Some(bridge.instance_id().into()),
+            terminal_build: Some("5000".into()),
+            progress_percent: 50,
+            row_count: 1,
+            export_path: Some(export_path.to_string_lossy().into_owned()),
+            export_sha256: Some(format!("{:x}", Sha256::digest(&bytes))),
+            validation_valid,
+            coverage: CalendarCoverage {
+                requested_from: "2024-01-01T00:00:00".into(),
+                requested_to: "2024-02-01T00:00:00".into(),
+                observed_from: Some("2024-01-01T00:00:00".into()),
+                observed_to: Some("2024-01-01T00:00:00".into()),
+                completeness: "complete".into(),
+            },
+            error_code: None,
+            error_message: None,
+            datasets: Vec::new(),
+        };
+        write_job(&job).unwrap();
+        (StoredJobGuard { job_id }, job)
+    }
+
+    fn payload(response: &Value) -> Value {
+        serde_json::from_str(response["content"][0]["text"].as_str().unwrap()).unwrap()
+    }
 
     #[test]
     fn normalization_is_idempotent_and_uses_or_within_categories() {
@@ -920,5 +1171,158 @@ mod tests {
         duplicate.write_record(conflicting).unwrap();
         fs::write(&source, duplicate.into_inner().unwrap()).unwrap();
         assert!(validate_export(&source, &destination).is_err());
+    }
+
+    #[tokio::test]
+    async fn ready_export_can_publish_another_dataset() {
+        let root = tempdir().unwrap();
+        let config = test_config(root.path());
+        let job_id = format!("test_ready_{}", uuid::Uuid::new_v4().simple());
+        let (_guard, mut job) = stored_job(
+            root.path(),
+            &config,
+            job_id.clone(),
+            CalendarJobState::Ready,
+            true,
+        );
+        job.datasets.push("first-dataset".into());
+        write_job(&job).unwrap();
+
+        let response = handle_prepare_calendar_backtest_dataset(
+            &config,
+            &json!({"job_id": job_id, "dataset_name": "second-dataset"}),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response["isError"], false, "{}", payload(&response));
+        assert_eq!(
+            read_job(job.job_id.as_str()).unwrap().datasets,
+            vec!["first-dataset", "second-dataset"]
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_failure_does_not_publish_dataset_directory() {
+        let root = tempdir().unwrap();
+        let mut config = test_config(root.path());
+        let blocked_include = root.path().join("include-is-a-file");
+        fs::write(&blocked_include, b"not a directory").unwrap();
+        config.include_dir = Some(blocked_include.to_string_lossy().into_owned());
+        let job_id = format!("test_transaction_{}", uuid::Uuid::new_v4().simple());
+        let (_guard, _job) = stored_job(
+            root.path(),
+            &config,
+            job_id.clone(),
+            CalendarJobState::Validated,
+            true,
+        );
+        let dataset_id = "must-not-be-published";
+
+        let result = handle_prepare_calendar_backtest_dataset(
+            &config,
+            &json!({"job_id": job_id, "dataset_name": dataset_id}),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let target = config
+            .terminal_common_files_dir()
+            .unwrap()
+            .join("mt5-mcp-quant")
+            .join("calendar")
+            .join("datasets")
+            .join(dataset_id);
+        assert!(
+            !target.exists(),
+            "provider failure must roll back the staged dataset"
+        );
+    }
+
+    #[tokio::test]
+    async fn prepared_retry_rechecks_bridge_installation() {
+        let root = tempdir().unwrap();
+        let config = test_config(root.path());
+        let args = json!({
+            "currencies": ["USD"],
+            "importance": ["high"],
+            "from": "2024-01-01T00:00:00",
+            "to": "2024-02-01T00:00:00"
+        });
+        let filters = normalize_filters(&args).unwrap();
+        let bridge = BridgeClient::new(&config).unwrap();
+        let fingerprint = fingerprint(&filters, None, Some(bridge.instance_id())).unwrap();
+        let job_id = format!("cal_{}", &fingerprint[..24]);
+        let (_guard, mut job) = stored_job(
+            root.path(),
+            &config,
+            job_id,
+            CalendarJobState::Prepared,
+            false,
+        );
+        job.fingerprint = fingerprint;
+        job.error_code = Some("bridge_install_failed".into());
+        job.error_message = Some("transient compiler failure".into());
+        write_job(&job).unwrap();
+
+        fs::create_dir_all(bridge.service_source_path().parent().unwrap()).unwrap();
+        let source = include_bytes!("../../../mql/MT5McpQuantBridge.mq5");
+        fs::write(bridge.service_source_path(), source).unwrap();
+        fs::write(bridge.service_binary_path(), b"compiled fixture").unwrap();
+        fs::write(
+            bridge.service_source_path().with_extension("sha256"),
+            format!("{:x}", Sha256::digest(source)),
+        )
+        .unwrap();
+
+        let response = handle_prepare_calendar_export(&config, &args)
+            .await
+            .unwrap();
+        let body = payload(&response);
+        assert!(body.get("installation").is_some());
+        assert!(body["job"]["error_code"].is_null());
+    }
+
+    #[tokio::test]
+    async fn inspect_recovers_completed_running_job_after_restart() {
+        let root = tempdir().unwrap();
+        let config = test_config(root.path());
+        let job_id = format!("test_recover_{}", uuid::Uuid::new_v4().simple());
+        let (_guard, _job) = stored_job(
+            root.path(),
+            &config,
+            job_id.clone(),
+            CalendarJobState::Running,
+            false,
+        );
+        let bridge = BridgeClient::new(&config).unwrap();
+        fs::create_dir_all(bridge.root().join("requests")).unwrap();
+        fs::create_dir_all(bridge.root().join("responses")).unwrap();
+        let raw_relative = format!("mt5-mcp-quant/calendar/jobs/{}/raw.csv", job_id);
+        let raw_path = config
+            .terminal_common_files_dir()
+            .unwrap()
+            .join(raw_relative.replace('/', "\\"));
+        fs::create_dir_all(raw_path.parent().unwrap()).unwrap();
+        fs::write(&raw_path, valid_calendar_csv()).unwrap();
+        let legacy_request_id = uuid::Uuid::new_v4().simple().to_string();
+        let response_path = bridge
+            .root()
+            .join("responses")
+            .join(format!("{}.res", legacy_request_id));
+        fs::write(
+            response_path,
+            format!(
+                "protocol=1\nrequest_id={}\ninstance_id={}\nok=true\nraw_file={}\naccount_server=Broker-Demo\nterminal_build=5000\ncompleteness=complete\n",
+                legacy_request_id, bridge.instance_id(), raw_relative
+            ),
+        )
+        .unwrap();
+
+        let response = handle_inspect_calendar_export(&config, &json!({"job_id": job_id}))
+            .await
+            .unwrap();
+
+        assert_eq!(payload(&response)["job"]["state"], "validated");
     }
 }

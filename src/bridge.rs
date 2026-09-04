@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const BRIDGE_PROTOCOL_VERSION: &str = "1";
-pub const BRIDGE_SERVICE_VERSION: &str = "1.0.0";
+pub const BRIDGE_SERVICE_VERSION: &str = "1.0.1";
 pub const BRIDGE_NAMESPACE: &str = "MT5-MCP-Quant";
 const SERVICE_SOURCE: &str = include_str!("../mql/MT5McpQuantBridge.mq5");
 static BRIDGE_INSTALL_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
@@ -272,6 +272,18 @@ impl BridgeClient {
         fields: &BTreeMap<String, String>,
         timeout: Duration,
     ) -> Result<BridgeResponse> {
+        let request_id = uuid::Uuid::new_v4().simple().to_string();
+        self.request_with_id(operation, fields, timeout, &request_id)
+            .await
+    }
+
+    pub async fn request_with_id(
+        &self,
+        operation: &str,
+        fields: &BTreeMap<String, String>,
+        timeout: Duration,
+        request_id: &str,
+    ) -> Result<BridgeResponse> {
         if ![
             "list_server_symbols",
             "ensure_selected_exact",
@@ -282,8 +294,7 @@ impl BridgeClient {
             bail!("bridge operation is not allowlisted: {}", operation);
         }
         self.ensure_protocol_dirs()?;
-        let request_id = uuid::Uuid::new_v4().simple().to_string();
-        validate_id(&request_id)?;
+        validate_id(request_id)?;
         let request_path = self
             .root
             .join("requests")
@@ -292,9 +303,11 @@ impl BridgeClient {
             .root
             .join("responses")
             .join(format!("{}.res", request_id));
+        let _ = fs::remove_file(&request_path);
+        let _ = fs::remove_file(&response_path);
         let mut request = BTreeMap::from([
             ("protocol".to_string(), BRIDGE_PROTOCOL_VERSION.to_string()),
-            ("request_id".to_string(), request_id.clone()),
+            ("request_id".to_string(), request_id.to_string()),
             ("instance_id".to_string(), self.instance_id.clone()),
             ("operation".to_string(), operation.to_string()),
             ("created_epoch".to_string(), now_epoch().to_string()),
@@ -315,18 +328,8 @@ impl BridgeClient {
 
         let started = std::time::Instant::now();
         while started.elapsed() <= timeout {
-            if response_path.is_file() {
-                let raw = fs::read_to_string(&response_path)
-                    .with_context(|| format!("read bridge response {}", response_path.display()))?;
-                let parsed = parse_fields(&raw)?;
-                if parsed.get("request_id") != Some(&request_id)
-                    || parsed.get("instance_id") != Some(&self.instance_id)
-                    || parsed.get("protocol").map(String::as_str) != Some(BRIDGE_PROTOCOL_VERSION)
-                {
-                    bail!("bridge response identity or protocol mismatch");
-                }
-                let _ = fs::remove_file(&response_path);
-                return Ok(BridgeResponse { fields: parsed });
+            if let Some(response) = self.take_response(request_id)? {
+                return Ok(response);
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -337,6 +340,78 @@ impl BridgeClient {
             request_id,
             timeout.as_millis()
         )
+    }
+
+    pub fn take_response(&self, request_id: &str) -> Result<Option<BridgeResponse>> {
+        self.read_response(request_id, true)
+    }
+
+    pub fn take_calendar_response(&self, job_id: &str) -> Result<Option<BridgeResponse>> {
+        validate_id(job_id)?;
+        let responses_dir = self.root.join("responses");
+        let mut response_ids = fs::read_dir(&responses_dir)
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .filter_map(|entry| {
+                        let path = entry.path();
+                        (path.extension().and_then(|value| value.to_str()) == Some("res"))
+                            .then(|| {
+                                path.file_stem()
+                                    .and_then(|value| value.to_str())
+                                    .map(str::to_string)
+                            })
+                            .flatten()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        response_ids.sort();
+        let expected_raw = format!("mt5-mcp-quant/calendar/jobs/{}/raw.csv", job_id);
+        for request_id in response_ids {
+            if validate_id(&request_id).is_err() {
+                continue;
+            }
+            let Ok(Some(response)) = self.read_response(&request_id, false) else {
+                continue;
+            };
+            if response
+                .get("raw_file")
+                .map(|value| value.replace('\\', "/"))
+                .as_deref()
+                != Some(expected_raw.as_str())
+            {
+                continue;
+            }
+            let path = responses_dir.join(format!("{}.res", request_id));
+            let _ = fs::remove_file(path);
+            return Ok(Some(response));
+        }
+        Ok(None)
+    }
+
+    fn read_response(&self, request_id: &str, remove: bool) -> Result<Option<BridgeResponse>> {
+        validate_id(request_id)?;
+        let response_path = self
+            .root
+            .join("responses")
+            .join(format!("{}.res", request_id));
+        if !response_path.is_file() {
+            return Ok(None);
+        }
+        let raw = fs::read_to_string(&response_path)
+            .with_context(|| format!("read bridge response {}", response_path.display()))?;
+        let parsed = parse_fields(&raw)?;
+        if parsed.get("request_id").map(String::as_str) != Some(request_id)
+            || parsed.get("instance_id") != Some(&self.instance_id)
+            || parsed.get("protocol").map(String::as_str) != Some(BRIDGE_PROTOCOL_VERSION)
+        {
+            bail!("bridge response identity or protocol mismatch");
+        }
+        if remove {
+            let _ = fs::remove_file(&response_path);
+        }
+        Ok(Some(BridgeResponse { fields: parsed }))
     }
 
     pub async fn list_server_symbols(&self, timeout: Duration) -> Result<Vec<String>> {
