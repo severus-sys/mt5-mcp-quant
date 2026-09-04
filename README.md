@@ -49,6 +49,15 @@ In short: **the runtime needs an executable, but the user should not have to man
 - For a pre-built release: no Rust or Visual Studio installation is required
 - For source builds only: [Rust stable](https://rust-lang.org/tools/install/) and Visual Studio’s [Desktop development with C++](https://learn.microsoft.com/en-us/visualstudio/install/workload-component-id-vs-build-tools?view=visualstudio) workload
 
+### Release formats
+
+Each Windows release publishes two equivalent, checksummed artifacts:
+
+- `mt5-mcp-quant-windows-x64.mcpb` is the installable Windows MCP Bundle referenced by the MCP Registry.
+- `mcp-mt5-mcp-quant-windows-x64.tar.gz` is the portable archive for agents and manual installation.
+
+Both contain the binary, configuration example, documentation, PowerShell installers, all ten MT5 skills, auditable MQL sources, README, changelog, and license. crates.io publishing is intentionally out of scope.
+
 ### Agent-managed installation
 
 Give this prompt to Codex, Claude Code, OpenCode, or Hermes from the repository directory:

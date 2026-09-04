@@ -6,6 +6,7 @@ param(
     [string]$Symbol,
     [string]$FromDate = '2025.01.06',
     [string]$ToDate = '2025.01.07',
+    [switch]$ContractOnly,
     [switch]$KeepArtifacts
 )
 
@@ -28,15 +29,15 @@ $expectedTools = @(
     'clone_set_file', 'compare_backtests', 'compare_baseline', 'compile_ea',
     'copy_indicator_to_project', 'copy_script_to_project', 'create_set_template',
     'describe_sweep', 'diagnose_wine', 'diff_set_files', 'export_deals_csv',
-    'export_report', 'get_active_account', 'get_backtest_crash_info',
+    'ensure_market_watch_symbol', 'export_report', 'get_active_account', 'get_backtest_crash_info',
     'get_backtest_history', 'get_backtest_status', 'get_best_reports',
     'get_comparable_reports', 'get_history', 'get_latest_report', 'get_mt5_logs',
     'get_optimization_results', 'get_optimization_status', 'get_report_by_id',
     'get_reports_by_set_file', 'get_reports_summary', 'get_tester_log',
     'get_wine_prefix_info', 'healthcheck', 'init_project', 'kill_mt5_process',
-    'launch_backtest', 'list_deals', 'list_experts', 'list_indicators', 'list_jobs',
+    'inspect_calendar_export', 'launch_backtest', 'list_deals', 'list_experts', 'list_indicators', 'list_jobs',
     'list_reports', 'list_scripts', 'list_set_files', 'list_symbols', 'patch_set_file',
-    'promote_to_baseline', 'prune_reports', 'read_set_file', 'run_backtest',
+    'prepare_calendar_backtest_dataset', 'prepare_calendar_export', 'promote_to_baseline', 'prune_reports', 'read_set_file', 'run_backtest',
     'run_backtest_only', 'run_backtest_quick', 'run_optimization',
     'run_rolling_backtest', 'search_deals_by_comment', 'search_deals_by_magic',
     'search_experts', 'search_indicators', 'search_mt5_errors', 'search_reports',
@@ -117,14 +118,31 @@ try {
     Assert-True (-not $toolsResponse.error) "tools/list failed: $($toolsResponse.error.message)"
     $tools = @($toolsResponse.result.tools)
     $actualNames = @($tools.name | Sort-Object)
-    Assert-True ($actualNames.Count -eq 92) "Expected exactly 92 tools, found $($actualNames.Count)"
-    Assert-True ((@($actualNames | Select-Object -Unique)).Count -eq 92) 'Tool names are not unique'
-    Assert-True (($actualNames -join "`n") -eq ($expectedTools -join "`n")) 'Exact 92-tool inventory changed'
+    Assert-True ($actualNames.Count -eq 96) "Expected exactly 96 tools, found $($actualNames.Count)"
+    Assert-True ((@($actualNames | Select-Object -Unique)).Count -eq 96) 'Tool names are not unique'
+    Assert-True (($actualNames -join "`n") -eq ($expectedTools -join "`n")) 'Exact 96-tool inventory changed'
     foreach ($tool in $tools) {
         Assert-True ($tool.inputSchema.type -eq 'object') "$($tool.name) has an invalid input schema"
     }
+    $marketWatchSchema = $tools | Where-Object name -eq 'ensure_market_watch_symbol'
+    Assert-True ($marketWatchSchema.inputSchema.required -contains 'symbol') 'Market Watch schema does not require symbol'
+    Assert-True ($marketWatchSchema.inputSchema.properties.timeout_ms.minimum -eq 500) 'Market Watch timeout minimum changed'
+    Assert-True ($marketWatchSchema.inputSchema.properties.timeout_ms.maximum -eq 30000) 'Market Watch timeout maximum changed'
+    $prepareSchema = $tools | Where-Object name -eq 'prepare_calendar_export'
+    Assert-True (($prepareSchema.inputSchema.required -join ',') -eq 'from,to') 'Calendar prepare date requirements changed'
+    $inspectSchema = $tools | Where-Object name -eq 'inspect_calendar_export'
+    Assert-True ($inspectSchema.inputSchema.required -contains 'job_id') 'Calendar inspect schema does not require job_id'
+    $datasetSchema = $tools | Where-Object name -eq 'prepare_calendar_backtest_dataset'
+    Assert-True (($datasetSchema.inputSchema.required -join ',') -eq 'job_id,dataset_name') 'Calendar dataset requirements changed'
 
-    Write-Host '2/5 Dispatch validation for all 92 tools'
+    $initializeResponse = Invoke-McpRequest @{
+        jsonrpc = '2.0'; id = 2; method = 'initialize'
+        params = @{ protocolVersion = '2024-11-05'; capabilities = @{}; clientInfo = @{ name = 'instructions-test'; version = '1.0' } }
+    }
+    Assert-True ($initializeResponse.result.instructions -match 'list_symbols') 'Initialize instructions are missing symbol orientation'
+    Assert-True ($initializeResponse.result.instructions -match 'prepare_calendar_export') 'Initialize instructions are missing calendar routing'
+
+    Write-Host '2/5 Dispatch validation for all 96 tools'
     $safeArguments = @{
         update = @{ dry_run = $true }
         kill_mt5_process = @{ pid = 'not-a-pid'; force = $false }
@@ -141,6 +159,10 @@ try {
         search_reports_by_tags = @{ tags = @('__none__') }
         search_reports_by_notes = @{ query = '__none__' }
         get_reports_by_set_file = @{ set_file = '__none__' }
+        ensure_market_watch_symbol = @{ symbol = 'EURUSD'; timeout_ms = 10 }
+        prepare_calendar_export = @{ from = '2024-01-01T00:00:00'; to = '2024-02-01T00:00:00' }
+        inspect_calendar_export = @{ job_id = '__missing__' }
+        prepare_calendar_backtest_dataset = @{ job_id = 'safe_job'; dataset_name = 'bad/name' }
     }
     $requestId = 100
     foreach ($name in $expectedTools) {
@@ -150,6 +172,27 @@ try {
             throw "$name is listed but not dispatched: $($response.error.message)"
         }
         $requestId++
+    }
+
+    $legacyNames = @($expectedTools | Where-Object { $_ -notin @(
+        'ensure_market_watch_symbol', 'prepare_calendar_export',
+        'inspect_calendar_export', 'prepare_calendar_backtest_dataset'
+    ) })
+    Assert-True ($legacyNames.Count -eq 92) 'The original 92-tool surface changed'
+
+    $invalidTimeout = Invoke-Tool 'ensure_market_watch_symbol' @{ symbol = 'EURUSD'; timeout_ms = 10 } 900
+    Assert-True (($invalidTimeout.result.content[0].text | ConvertFrom-Json).code -eq 'invalid_timeout') 'Market Watch timeout validation failed'
+    $invalidCalendar = Invoke-Tool 'prepare_calendar_export' @{ currencies = @(); country_codes = @(); from = '2024-01-01T00:00:00'; to = '2024-02-01T00:00:00' } 901
+    Assert-True (($invalidCalendar.result.content[0].text | ConvertFrom-Json).code -eq 'invalid_calendar_filter') 'Calendar filter validation failed'
+    $invalidDataset = Invoke-Tool 'prepare_calendar_backtest_dataset' @{ job_id = 'safe_job'; dataset_name = 'bad/name' } 902
+    Assert-True (($invalidDataset.result.content[0].text | ConvertFrom-Json).code -eq 'invalid_dataset_name') 'Dataset name validation failed'
+
+    if ($ContractOnly) {
+        Write-Host '3/5 MT5-independent contract mode: native diagnostics skipped'
+        Write-Host '4/5 MT5-independent contract mode: stateful round trips skipped'
+        Write-Host '5/5 MT5-independent contract mode: MetaEditor and Strategy Tester skipped'
+        Write-Host 'PASS: exact 96-tool contract and safe dispatch completed.' -ForegroundColor Green
+        return
     }
 
     Write-Host '3/5 Native Windows diagnostics and read-only behavior'
@@ -233,7 +276,7 @@ try {
         Write-Host '5/5 Stateful MT5 compile/backtest skipped (use -RunMt5 -KillExisting)'
     }
 
-    Write-Host "PASS: exact 92-tool contract and Windows semantic E2E completed." -ForegroundColor Green
+    Write-Host "PASS: exact 96-tool contract and Windows semantic E2E completed." -ForegroundColor Green
 }
 finally {
     if ($KeepArtifacts) {

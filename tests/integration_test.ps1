@@ -55,8 +55,8 @@ function Invoke-McpRequest {
 $toolsResponse = Invoke-McpRequest @{
     jsonrpc = '2.0'; id = 1; method = 'tools/list'; params = @{}
 }
-if ($toolsResponse.result.tools.Count -lt 92) {
-    throw "Expected at least 92 tools, found: $($toolsResponse.result.tools.Count)"
+if ($toolsResponse.result.tools.Count -ne 96) {
+    throw "Expected exactly 96 tools, found: $($toolsResponse.result.tools.Count)"
 }
 
 $verifyResponse = Invoke-McpRequest @{
