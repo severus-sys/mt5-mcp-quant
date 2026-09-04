@@ -399,6 +399,15 @@ pub async fn handle_prepare_calendar_export(config: &Config, args: &Value) -> Re
         .get("overwrite")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    if overwrite && job_path(&job_id).is_file() && export_is_active(&job_id) {
+        let existing = read_job(&job_id)?;
+        return Ok(tool_error(json!({
+            "code": "calendar_export_active",
+            "error": "The matching calendar export is already running; overwrite was refused.",
+            "job": existing,
+            "inspect_with": { "tool": "inspect_calendar_export", "job_id": job_id }
+        })));
+    }
     if job_path(&job_id).is_file() && !overwrite {
         let mut existing = read_job(&job_id)?;
         if existing.state == CalendarJobState::Running && !export_is_active(&job_id) {
@@ -1357,6 +1366,44 @@ mod tests {
             Some("calendar_provider_install_failed")
         );
         fs::remove_dir_all(jobs_root().join(stored.job_id)).unwrap();
+    }
+
+    #[tokio::test]
+    async fn overwrite_refuses_to_replace_an_active_export() {
+        let root = tempdir().unwrap();
+        let config = test_config(root.path());
+        let args = json!({
+            "currencies": ["USD"],
+            "importance": ["high"],
+            "from": "2024-05-01T00:00:00",
+            "to": "2024-06-01T00:00:00",
+            "overwrite": true
+        });
+        let filters = normalize_filters(&args).unwrap();
+        let bridge = BridgeClient::new(&config).unwrap();
+        let fingerprint = fingerprint(&filters, None, Some(bridge.instance_id())).unwrap();
+        let job_id = format!("cal_{}", &fingerprint[..24]);
+        let (_guard, mut job) = stored_job(
+            root.path(),
+            &config,
+            job_id.clone(),
+            CalendarJobState::Running,
+            false,
+        );
+        job.fingerprint = fingerprint;
+        write_job(&job).unwrap();
+        let _lease = ActiveExportLease::acquire(&job_id).unwrap();
+
+        let response = handle_prepare_calendar_export(&config, &args)
+            .await
+            .unwrap();
+        let body = payload(&response);
+
+        assert_eq!(response["isError"], true);
+        assert_eq!(body["code"], "calendar_export_active");
+        let stored = read_job(&job_id).unwrap();
+        assert_eq!(stored.created_at, job.created_at);
+        assert_eq!(stored.state, CalendarJobState::Running);
     }
 
     #[tokio::test]

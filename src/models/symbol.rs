@@ -98,9 +98,10 @@ fn unique_or_ambiguous(candidates: Vec<String>, kind: SymbolAliasKind) -> Option
 }
 
 fn cent_base(symbol: &str) -> String {
+    let symbol_lower = symbol.to_ascii_lowercase();
     for suffix in [".cent", ".c"] {
-        if let Some(base) = symbol.strip_suffix(suffix) {
-            return base.to_ascii_lowercase();
+        if symbol_lower.ends_with(suffix) {
+            return symbol[..symbol.len() - suffix.len()].to_ascii_lowercase();
         }
     }
 
@@ -191,6 +192,24 @@ mod tests {
             resolve_symbol("XAUUSDc", &symbols(&["XAUUSD.cent"])),
             SymbolMatch::Alias {
                 resolved: "XAUUSD.cent".into(),
+                kind: SymbolAliasKind::CentAlias,
+            }
+        );
+    }
+
+    #[test]
+    fn dotted_cent_suffixes_remain_case_insensitive() {
+        assert_eq!(
+            resolve_symbol("XAUUSD", &symbols(&["XAUUSD.C", "XAUUSDm"])),
+            SymbolMatch::Alias {
+                resolved: "XAUUSD.C".into(),
+                kind: SymbolAliasKind::CentAlias,
+            }
+        );
+        assert_eq!(
+            resolve_symbol("XAUUSD", &symbols(&["XAUUSD.CENT", "XAUUSDm"])),
+            SymbolMatch::Alias {
+                resolved: "XAUUSD.CENT".into(),
                 kind: SymbolAliasKind::CentAlias,
             }
         );

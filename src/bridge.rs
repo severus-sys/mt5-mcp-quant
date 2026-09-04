@@ -468,11 +468,13 @@ pub fn terminal_instance_id(data_dir: &Path) -> String {
         .to_string_lossy()
         .replace('/', "\\")
         .trim_end_matches('\\')
-        .to_ascii_lowercase();
+        .chars()
+        .map(|character| character.to_lowercase().next().unwrap_or(character))
+        .collect::<String>();
     let mut hash = 0xcbf29ce484222325u64;
-    // MQL5 StringGetCharacter yields UTF-16 code units and the Service hashes
-    // their low byte. Mirror that exactly so non-ASCII Windows paths bind to
-    // the same terminal instance on both sides of the protocol.
+    // MQL5 StringToLower performs a simple, one-code-point lowercase mapping,
+    // then StringGetCharacter exposes UTF-16 code units. Mirror both steps so
+    // case-equivalent Windows paths bind to the same terminal instance.
     for code_unit in normalized.encode_utf16() {
         hash ^= u64::from((code_unit & 0x00ff) as u8);
         hash = hash.wrapping_mul(0x100000001b3);
@@ -600,13 +602,13 @@ mod tests {
     }
 
     #[test]
-    fn service_uses_the_same_ascii_only_path_casing_as_rust() {
-        assert_ne!(
+    fn service_and_rust_fold_non_ascii_path_case_consistently() {
+        assert_eq!(
             terminal_instance_id(Path::new(r"C:\Veri\ÜST\Terminal")),
             terminal_instance_id(Path::new(r"c:\veri\üst\terminal"))
         );
-        assert!(SERVICE_SOURCE.contains("AsciiLowerPath(value)"));
-        assert!(!SERVICE_SOURCE.contains("StringToLower(value)"));
+        assert!(SERVICE_SOURCE.contains("StringToLower(value)"));
+        assert!(!SERVICE_SOURCE.contains("AsciiLowerPath"));
     }
 
     #[test]

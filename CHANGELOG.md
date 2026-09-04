@@ -6,10 +6,10 @@ All notable changes to MT5-MCP-Quant are documented here.
 
 ### Fixed
 
-- Prevented legitimate symbols ending in uppercase `C` from being misclassified as cent-account aliases.
-- Aligned Rust and MQL terminal-instance path casing, verified deployed Service source contents, and removed queued requests after client timeouts.
+- Prevented legitimate symbols ending in uppercase `C` from being misclassified as cent-account aliases while preserving case-insensitive `.C` and `.CENT` aliases.
+- Aligned Rust and MQL Unicode terminal-instance path casing, verified deployed Service source contents, and removed queued requests after client timeouts.
 - Made prepared calendar jobs retry bridge installation, recover completed responses after MCP restarts without becoming stranded in an intermediate state, and remain reusable for multiple tester datasets.
-- Made calendar dataset publication transactional with provider deployment and persistent job metadata.
+- Rejected overwrites of active calendar exports and made dataset publication transactional with provider deployment and persistent job metadata.
 
 ## [1.35.0] - 2026-09-04
 
