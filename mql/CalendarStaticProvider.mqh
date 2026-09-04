@@ -68,22 +68,6 @@ private:
       return true;
      }
 
-   string InstanceId() const
-     {
-      string value=TerminalInfoString(TERMINAL_DATA_PATH);
-      StringReplace(value,"/","\\");
-      StringToLower(value);
-      while(StringLen(value)>0 && StringSubstr(value,StringLen(value)-1)=="\\")
-         value=StringSubstr(value,0,StringLen(value)-1);
-      ulong hash=0xCBF29CE484222325;
-      for(int index=0; index<StringLen(value); index++)
-        {
-         hash^=(uchar)StringGetCharacter(value,index);
-         hash*=0x100000001B3;
-        }
-      return StringFormat("%016I64X",hash);
-     }
-
    string Sha256(const string file_name)
      {
       uchar data[],key[],digest[];
@@ -166,16 +150,18 @@ public:
          return false;
         }
       string broker=ManifestValue(keys,values,"broker_server");
-      string instance=ManifestValue(keys,values,"terminal_instance_id");
       bool broker_mismatch=broker!="" && broker!=AccountInfoString(ACCOUNT_SERVER);
-      bool instance_mismatch=instance!="" && instance!=InstanceId();
-      if((broker_mismatch || instance_mismatch) && !allow_broker_mismatch)
+      // The Strategy Tester runs under an agent data path, so its terminal
+      // instance hash intentionally differs from the exporting terminal. The
+      // instance in the manifest is provenance; broker/server is the portable
+      // compatibility boundary enforced by this provider.
+      if(broker_mismatch && !allow_broker_mismatch)
         {
-         m_last_error="broker_or_terminal_mismatch";
+         m_last_error="broker_mismatch";
          return false;
         }
-      if(broker_mismatch || instance_mismatch)
-         Print("MT5-MCP-Quant WARNING: calendar dataset broker/terminal mismatch was explicitly allowed");
+      if(broker_mismatch)
+         Print("MT5-MCP-Quant WARNING: calendar dataset broker/server mismatch was explicitly allowed");
       string csv_file=root+ManifestValue(keys,values,"csv_file");
       string expected=ManifestValue(keys,values,"csv_sha256");
       string actual=Sha256(csv_file);

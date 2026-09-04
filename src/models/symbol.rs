@@ -68,10 +68,9 @@ pub fn resolve_symbol(requested: &str, available: &[String]) -> SymbolMatch {
 
     let affix_matches = matching(&catalog, |symbol| {
         let symbol_lower = symbol.to_ascii_lowercase();
-        symbol_lower.starts_with(&requested_lower)
-            || symbol_lower.ends_with(&requested_lower)
-            || requested_lower.starts_with(&symbol_lower)
-            || requested_lower.ends_with(&symbol_lower)
+        symbol_lower.len() > requested_lower.len()
+            && (symbol_lower.starts_with(&requested_lower)
+                || symbol_lower.ends_with(&requested_lower))
     });
     unique_or_ambiguous(affix_matches, SymbolAliasKind::UniqueAffix).unwrap_or(SymbolMatch::NoMatch)
 }
@@ -153,6 +152,13 @@ mod tests {
                 kind: SymbolAliasKind::UniqueAffix,
             }
         );
+        assert_eq!(
+            resolve_symbol("EURUSD", &symbols(&["fxEURUSD"])),
+            SymbolMatch::Alias {
+                resolved: "fxEURUSD".into(),
+                kind: SymbolAliasKind::UniqueAffix,
+            }
+        );
     }
 
     #[test]
@@ -168,6 +174,10 @@ mod tests {
         assert_eq!(resolve_symbol("EURUSD", &[]), SymbolMatch::NoMatch);
         assert_eq!(
             resolve_symbol("EURUSD", &symbols(&["GBPJPY"])),
+            SymbolMatch::NoMatch
+        );
+        assert_eq!(
+            resolve_symbol("BTCUSD", &symbols(&["B", "BTC", "USD", "SD"])),
             SymbolMatch::NoMatch
         );
     }

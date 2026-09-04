@@ -10,6 +10,7 @@ venv/
 # Runtime data and generated reports (never publish)
 reports/
 reports.db
+calendar/
 .mt5_mcp_quant_history/
 test-artifacts/
 

@@ -28,11 +28,21 @@ foreach ($forbidden in @('WebRequest(', 'OrderSend(', 'ShellExecute', '#import',
     Assert-Contract (-not $service.Contains($forbidden)) "Forbidden MQL Service capability found: $forbidden"
 }
 
+# FILE_COMMON requests are produced by Rust with Unix UTC timestamps. MQL's
+# TimeLocal() is a timezone-shifted wall clock, so using it for protocol expiry
+# or externally observed timestamps breaks every non-UTC installation.
+Assert-Contract (-not ($service -match '"updated_epoch"[^\r\n]*TimeLocal\(\)')) 'Protocol timestamps must not use TimeLocal()'
+Assert-Contract (-not ($service -match 'expires_epoch[^\r\n]*TimeLocal\(\)')) 'Request expiry must not use TimeLocal()'
+$utcProtocolClockUses = [regex]::Matches($service, '(?:"updated_epoch"|expires_epoch)[^\r\n]*TimeGMT\(\)').Count
+Assert-Contract ($utcProtocolClockUses -eq 3) "Expected exactly three UTC protocol clock uses; found $utcProtocolClockUses"
+
 $csvColumns = 'schema_version,value_id,event_id,time_server_epoch,time_server,period_server_epoch,period_server,revision,country_id,country_code,country_name,currency,event_type,sector,frequency,time_mode,unit,importance,multiplier,digits,event_code,event_name,source_url,impact_type,actual,previous,revised_previous,forecast'
 Assert-Contract ($service.Contains($csvColumns)) 'Calendar CSV v1 schema changed'
 foreach ($method in @('Load(', 'ValueHistory(', 'HasEventWindow(', 'LastError(')) {
     Assert-Contract ($provider.Contains($method)) "Calendar provider method missing: $method"
 }
+Assert-Contract ($provider.Contains('m_last_error="broker_mismatch"')) 'Calendar provider must reject broker/server mismatches by default'
+Assert-Contract (-not $provider.Contains('instance_mismatch')) 'Strategy Tester data-path identity must not be treated as a broker mismatch'
 foreach ($function in @('CsvText', 'RawCalendarValue', 'ImportanceAllowed', 'NextMonth', 'WriteCalendarProgress', 'WriteCalendarRow', 'ExportCalendarSlice', 'HandleExportCalendar')) {
     $count = [regex]::Matches($service, "(?m)^(?:string|bool|datetime|void) $function\(").Count
     Assert-Contract ($count -eq 1) "MQL Service function $function must have exactly one definition; found $count"

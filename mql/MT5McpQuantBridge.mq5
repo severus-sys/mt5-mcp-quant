@@ -134,7 +134,9 @@ void AddContext(string &keys[],string &values[])
    PutField(keys,values,"account_server",AccountInfoString(ACCOUNT_SERVER));
    PutField(keys,values,"terminal_build",IntegerToString(TerminalInfoInteger(TERMINAL_BUILD)));
    PutField(keys,values,"connected",TerminalInfoInteger(TERMINAL_CONNECTED) ? "true" : "false");
-   PutField(keys,values,"updated_epoch",IntegerToString((long)TimeLocal()));
+   // Protocol timestamps are Unix UTC seconds. TimeLocal() encodes the Windows
+   // wall clock and is offset from Rust's SystemTime in non-UTC time zones.
+   PutField(keys,values,"updated_epoch",IntegerToString((long)TimeGMT()));
   }
 
 void WriteHeartbeat()
@@ -278,7 +280,7 @@ void WriteCalendarProgress(const string job_id,const int percent,const long rows
    PutField(keys,values,"progress_percent",IntegerToString(percent));
    PutField(keys,values,"row_count",IntegerToString(rows));
    PutField(keys,values,"phase",phase);
-   PutField(keys,values,"updated_epoch",IntegerToString((long)TimeLocal()));
+   PutField(keys,values,"updated_epoch",IntegerToString((long)TimeGMT()));
    WriteFieldsAtomic("mt5-mcp-quant\\calendar\\jobs\\"+job_id+"\\progress.kv",keys,values);
   }
 
@@ -469,7 +471,7 @@ void ProcessRequest(const string file_name)
       return;
      }
    long expires_epoch=(long)StringToInteger(FieldValue(keys,values,"expires_epoch"));
-   if(expires_epoch<=0 || expires_epoch<(long)TimeLocal())
+   if(expires_epoch<=0 || expires_epoch<(long)TimeGMT())
      {
       RespondError(request_id,"request_expired","Request expired before the Service could process it.");
       FileDelete(path,FILE_COMMON);
