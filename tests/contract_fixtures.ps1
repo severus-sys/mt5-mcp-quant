@@ -61,6 +61,8 @@ Assert-Contract ($definitions.Count -eq 96) "Expected 96 tool definitions, found
 Assert-Contract ($handlers.Count -eq 96) "Expected 96 dispatch arms, found $($handlers.Count)"
 
 $releaseWorkflow = Get-Content -LiteralPath (Join-Path $repoRoot '.github\workflows\release.yml') -Raw
+$registryManifest = Get-Content -LiteralPath (Join-Path $repoRoot 'server.json') -Raw | ConvertFrom-Json
+Assert-Contract ($registryManifest.description.Length -le 100) 'MCP Registry description exceeds 100 characters'
 Assert-Contract ($releaseWorkflow -match 'mt5-mcp-quant-windows-x64\.mcpb') 'Release workflow does not build an MCPB artifact'
 Assert-Contract ($releaseWorkflow -match "manifest_version = '0\.3'") 'Release workflow does not emit an MCPB v0.3 manifest'
 Assert-Contract ($releaseWorkflow -match "entry_point = 'mt5-mcp-quant\.exe'") 'MCPB binary entry point is missing'
