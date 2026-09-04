@@ -127,7 +127,11 @@ impl BridgeClient {
             .await;
         let expected_hash = format!("{:x}", Sha256::digest(SERVICE_SOURCE.as_bytes()));
         let hash_path = self.service_source_path().with_extension("sha256");
-        let already_current = self.service_binary_path().is_file()
+        let source_is_current = fs::read(self.service_source_path())
+            .map(|bytes| format!("{:x}", Sha256::digest(bytes)) == expected_hash)
+            .unwrap_or(false);
+        let already_current = source_is_current
+            && self.service_binary_path().is_file()
             && fs::read_to_string(&hash_path)
                 .map(|value| value.trim() == expected_hash)
                 .unwrap_or(false);
@@ -326,6 +330,8 @@ impl BridgeClient {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+        let _ = fs::remove_file(&request_path);
+        let _ = fs::remove_file(&response_path);
         bail!(
             "bridge request '{}' timed out after {} ms",
             request_id,
@@ -523,6 +529,16 @@ mod tests {
     }
 
     #[test]
+    fn service_uses_the_same_ascii_only_path_casing_as_rust() {
+        assert_ne!(
+            terminal_instance_id(Path::new(r"C:\Veri\ÜST\Terminal")),
+            terminal_instance_id(Path::new(r"c:\veri\üst\terminal"))
+        );
+        assert!(SERVICE_SOURCE.contains("AsciiLowerPath(value)"));
+        assert!(!SERVICE_SOURCE.contains("StringToLower(value)"));
+    }
+
+    #[test]
     fn ids_block_path_traversal_and_oversized_values() {
         assert!(validate_id("job_A-12").is_ok());
         assert!(validate_id("../escape").is_err());
@@ -619,6 +635,33 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("timed out"));
+        assert_eq!(
+            fs::read_dir(bridge.root().join("requests"))
+                .unwrap()
+                .count(),
+            0,
+            "a timed-out operation must not remain executable in the Service queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn installation_does_not_trust_binary_and_hash_without_source() {
+        let root = tempdir().unwrap();
+        let bridge = bridge_fixture(root.path());
+        fs::create_dir_all(bridge.service_source_path().parent().unwrap()).unwrap();
+        fs::write(bridge.service_binary_path(), b"compiled fixture").unwrap();
+        let expected_hash = format!("{:x}", Sha256::digest(SERVICE_SOURCE.as_bytes()));
+        fs::write(
+            bridge.service_source_path().with_extension("sha256"),
+            expected_hash,
+        )
+        .unwrap();
+
+        let result = bridge.ensure_installed().await;
+        assert!(
+            !matches!(result, Ok(BridgeInstallResult { changed: false, .. })),
+            "missing embedded source must trigger repair instead of an unchanged result"
+        );
     }
 
     #[tokio::test]

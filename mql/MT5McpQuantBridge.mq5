@@ -12,10 +12,21 @@ string g_instance_id;
 string g_root;
 datetime g_last_heartbeat=0;
 
+string AsciiLowerPath(string value)
+  {
+   for(int index=0; index<StringLen(value); index++)
+     {
+      ushort character=StringGetCharacter(value,index);
+      if(character>='A' && character<='Z')
+         StringSetCharacter(value,index,(ushort)(character+('a'-'A')));
+     }
+   return value;
+  }
+
 string NormalizePath(string value)
   {
    StringReplace(value,"/","\\");
-   StringToLower(value);
+   value=AsciiLowerPath(value);
    while(StringLen(value)>0 && StringSubstr(value,StringLen(value)-1)=="\\")
       value=StringSubstr(value,0,StringLen(value)-1);
    return value;
