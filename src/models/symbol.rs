@@ -98,23 +98,23 @@ fn unique_or_ambiguous(candidates: Vec<String>, kind: SymbolAliasKind) -> Option
 }
 
 fn cent_base(symbol: &str) -> String {
-    let lower = symbol.to_ascii_lowercase();
+    let symbol_lower = symbol.to_ascii_lowercase();
     for suffix in [".cent", ".c"] {
-        if let Some(base) = lower.strip_suffix(suffix) {
-            return base.to_string();
+        if symbol_lower.ends_with(suffix) {
+            return symbol[..symbol.len() - suffix.len()].to_ascii_lowercase();
         }
     }
 
-    if let Some(base) = lower.strip_suffix('c') {
+    if let Some(base) = symbol.strip_suffix('c') {
         if !base.is_empty()
             && base
                 .chars()
-                .all(|character| character.is_ascii_alphanumeric())
+                .all(|character| character.is_ascii_uppercase() || character.is_ascii_digit())
         {
-            return base.to_string();
+            return base.to_ascii_lowercase();
         }
     }
-    lower
+    symbol.to_ascii_lowercase()
 }
 
 #[cfg(test)]
@@ -179,6 +179,39 @@ mod tests {
         assert_eq!(
             resolve_symbol("BTCUSD", &symbols(&["B", "BTC", "USD", "SD"])),
             SymbolMatch::NoMatch
+        );
+    }
+
+    #[test]
+    fn uppercase_c_is_not_treated_as_a_cent_suffix() {
+        assert_eq!(
+            resolve_symbol("USDC", &symbols(&["USD"])),
+            SymbolMatch::NoMatch
+        );
+        assert_eq!(
+            resolve_symbol("XAUUSDc", &symbols(&["XAUUSD.cent"])),
+            SymbolMatch::Alias {
+                resolved: "XAUUSD.cent".into(),
+                kind: SymbolAliasKind::CentAlias,
+            }
+        );
+    }
+
+    #[test]
+    fn dotted_cent_suffixes_remain_case_insensitive() {
+        assert_eq!(
+            resolve_symbol("XAUUSD", &symbols(&["XAUUSD.C", "XAUUSDm"])),
+            SymbolMatch::Alias {
+                resolved: "XAUUSD.C".into(),
+                kind: SymbolAliasKind::CentAlias,
+            }
+        );
+        assert_eq!(
+            resolve_symbol("XAUUSD", &symbols(&["XAUUSD.CENT", "XAUUSDm"])),
+            SymbolMatch::Alias {
+                resolved: "XAUUSD.CENT".into(),
+                kind: SymbolAliasKind::CentAlias,
+            }
         );
     }
 }

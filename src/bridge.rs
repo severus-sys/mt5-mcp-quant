@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const BRIDGE_PROTOCOL_VERSION: &str = "1";
-pub const BRIDGE_SERVICE_VERSION: &str = "1.0.0";
+pub const BRIDGE_SERVICE_VERSION: &str = "1.0.1";
 pub const BRIDGE_NAMESPACE: &str = "MT5-MCP-Quant";
 const SERVICE_SOURCE: &str = include_str!("../mql/MT5McpQuantBridge.mq5");
 static BRIDGE_INSTALL_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
@@ -127,7 +127,11 @@ impl BridgeClient {
             .await;
         let expected_hash = format!("{:x}", Sha256::digest(SERVICE_SOURCE.as_bytes()));
         let hash_path = self.service_source_path().with_extension("sha256");
-        let already_current = self.service_binary_path().is_file()
+        let source_is_current = fs::read(self.service_source_path())
+            .map(|bytes| format!("{:x}", Sha256::digest(bytes)) == expected_hash)
+            .unwrap_or(false);
+        let already_current = source_is_current
+            && self.service_binary_path().is_file()
             && fs::read_to_string(&hash_path)
                 .map(|value| value.trim() == expected_hash)
                 .unwrap_or(false);
@@ -268,6 +272,18 @@ impl BridgeClient {
         fields: &BTreeMap<String, String>,
         timeout: Duration,
     ) -> Result<BridgeResponse> {
+        let request_id = uuid::Uuid::new_v4().simple().to_string();
+        self.request_with_id(operation, fields, timeout, &request_id)
+            .await
+    }
+
+    pub async fn request_with_id(
+        &self,
+        operation: &str,
+        fields: &BTreeMap<String, String>,
+        timeout: Duration,
+        request_id: &str,
+    ) -> Result<BridgeResponse> {
         if ![
             "list_server_symbols",
             "ensure_selected_exact",
@@ -278,8 +294,7 @@ impl BridgeClient {
             bail!("bridge operation is not allowlisted: {}", operation);
         }
         self.ensure_protocol_dirs()?;
-        let request_id = uuid::Uuid::new_v4().simple().to_string();
-        validate_id(&request_id)?;
+        validate_id(request_id)?;
         let request_path = self
             .root
             .join("requests")
@@ -288,9 +303,11 @@ impl BridgeClient {
             .root
             .join("responses")
             .join(format!("{}.res", request_id));
+        let _ = fs::remove_file(&request_path);
+        let _ = fs::remove_file(&response_path);
         let mut request = BTreeMap::from([
             ("protocol".to_string(), BRIDGE_PROTOCOL_VERSION.to_string()),
-            ("request_id".to_string(), request_id.clone()),
+            ("request_id".to_string(), request_id.to_string()),
             ("instance_id".to_string(), self.instance_id.clone()),
             ("operation".to_string(), operation.to_string()),
             ("created_epoch".to_string(), now_epoch().to_string()),
@@ -311,26 +328,86 @@ impl BridgeClient {
 
         let started = std::time::Instant::now();
         while started.elapsed() <= timeout {
-            if response_path.is_file() {
-                let raw = fs::read_to_string(&response_path)
-                    .with_context(|| format!("read bridge response {}", response_path.display()))?;
-                let parsed = parse_fields(&raw)?;
-                if parsed.get("request_id") != Some(&request_id)
-                    || parsed.get("instance_id") != Some(&self.instance_id)
-                    || parsed.get("protocol").map(String::as_str) != Some(BRIDGE_PROTOCOL_VERSION)
-                {
-                    bail!("bridge response identity or protocol mismatch");
-                }
-                let _ = fs::remove_file(&response_path);
-                return Ok(BridgeResponse { fields: parsed });
+            if let Some(response) = self.take_response(request_id)? {
+                return Ok(response);
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+        let _ = fs::remove_file(&request_path);
+        let _ = fs::remove_file(&response_path);
         bail!(
             "bridge request '{}' timed out after {} ms",
             request_id,
             timeout.as_millis()
         )
+    }
+
+    pub fn take_response(&self, request_id: &str) -> Result<Option<BridgeResponse>> {
+        self.read_response(request_id, true)
+    }
+
+    pub fn take_response_matching<F>(&self, mut matches: F) -> Result<Option<BridgeResponse>>
+    where
+        F: FnMut(&BridgeResponse) -> bool,
+    {
+        let responses_dir = self.root.join("responses");
+        let mut response_ids = fs::read_dir(&responses_dir)
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .filter_map(|entry| {
+                        let path = entry.path();
+                        (path.extension().and_then(|value| value.to_str()) == Some("res"))
+                            .then(|| {
+                                path.file_stem()
+                                    .and_then(|value| value.to_str())
+                                    .map(str::to_string)
+                            })
+                            .flatten()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        response_ids.sort();
+        for request_id in response_ids {
+            if validate_id(&request_id).is_err() {
+                continue;
+            }
+            let Ok(Some(response)) = self.read_response(&request_id, false) else {
+                continue;
+            };
+            if !matches(&response) {
+                continue;
+            }
+            let path = responses_dir.join(format!("{}.res", request_id));
+            let _ = fs::remove_file(path);
+            return Ok(Some(response));
+        }
+        Ok(None)
+    }
+
+    fn read_response(&self, request_id: &str, remove: bool) -> Result<Option<BridgeResponse>> {
+        validate_id(request_id)?;
+        let response_path = self
+            .root
+            .join("responses")
+            .join(format!("{}.res", request_id));
+        if !response_path.is_file() {
+            return Ok(None);
+        }
+        let raw = fs::read_to_string(&response_path)
+            .with_context(|| format!("read bridge response {}", response_path.display()))?;
+        let parsed = parse_fields(&raw)?;
+        if parsed.get("request_id").map(String::as_str) != Some(request_id)
+            || parsed.get("instance_id") != Some(&self.instance_id)
+            || parsed.get("protocol").map(String::as_str) != Some(BRIDGE_PROTOCOL_VERSION)
+        {
+            bail!("bridge response identity or protocol mismatch");
+        }
+        if remove {
+            let _ = fs::remove_file(&response_path);
+        }
+        Ok(Some(BridgeResponse { fields: parsed }))
     }
 
     pub async fn list_server_symbols(&self, timeout: Duration) -> Result<Vec<String>> {
@@ -391,11 +468,13 @@ pub fn terminal_instance_id(data_dir: &Path) -> String {
         .to_string_lossy()
         .replace('/', "\\")
         .trim_end_matches('\\')
-        .to_ascii_lowercase();
+        .chars()
+        .map(|character| character.to_lowercase().next().unwrap_or(character))
+        .collect::<String>();
     let mut hash = 0xcbf29ce484222325u64;
-    // MQL5 StringGetCharacter yields UTF-16 code units and the Service hashes
-    // their low byte. Mirror that exactly so non-ASCII Windows paths bind to
-    // the same terminal instance on both sides of the protocol.
+    // MQL5 StringToLower performs a simple, one-code-point lowercase mapping,
+    // then StringGetCharacter exposes UTF-16 code units. Mirror both steps so
+    // case-equivalent Windows paths bind to the same terminal instance.
     for code_unit in normalized.encode_utf16() {
         hash ^= u64::from((code_unit & 0x00ff) as u8);
         hash = hash.wrapping_mul(0x100000001b3);
@@ -523,6 +602,16 @@ mod tests {
     }
 
     #[test]
+    fn service_and_rust_fold_non_ascii_path_case_consistently() {
+        assert_eq!(
+            terminal_instance_id(Path::new(r"C:\Veri\ÜST\Terminal")),
+            terminal_instance_id(Path::new(r"c:\veri\üst\terminal"))
+        );
+        assert!(SERVICE_SOURCE.contains("StringToLower(value)"));
+        assert!(!SERVICE_SOURCE.contains("AsciiLowerPath"));
+    }
+
+    #[test]
     fn ids_block_path_traversal_and_oversized_values() {
         assert!(validate_id("job_A-12").is_ok());
         assert!(validate_id("../escape").is_err());
@@ -619,6 +708,33 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("timed out"));
+        assert_eq!(
+            fs::read_dir(bridge.root().join("requests"))
+                .unwrap()
+                .count(),
+            0,
+            "a timed-out operation must not remain executable in the Service queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn installation_does_not_trust_binary_and_hash_without_source() {
+        let root = tempdir().unwrap();
+        let bridge = bridge_fixture(root.path());
+        fs::create_dir_all(bridge.service_source_path().parent().unwrap()).unwrap();
+        fs::write(bridge.service_binary_path(), b"compiled fixture").unwrap();
+        let expected_hash = format!("{:x}", Sha256::digest(SERVICE_SOURCE.as_bytes()));
+        fs::write(
+            bridge.service_source_path().with_extension("sha256"),
+            expected_hash,
+        )
+        .unwrap();
+
+        let result = bridge.ensure_installed().await;
+        assert!(
+            !matches!(result, Ok(BridgeInstallResult { changed: false, .. })),
+            "missing embedded source must trigger repair instead of an unchanged result"
+        );
     }
 
     #[tokio::test]

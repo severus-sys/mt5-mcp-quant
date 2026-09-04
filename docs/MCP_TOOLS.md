@@ -2212,7 +2212,7 @@ Create or reuse a persistent asynchronous export job for the active broker's liv
 }
 ```
 
-At least one currency or country is required. Do not append `Z` or a UTC offset. The normalized filter fingerprint makes repeated preparation idempotent. A ready Service starts the job automatically; otherwise it remains `prepared` and returns one-time startup instructions.
+At least one currency or country is required. Do not append `Z` or a UTC offset. The normalized filter fingerprint makes repeated preparation idempotent. A ready Service starts the job automatically; otherwise it remains `prepared` and returns one-time startup instructions. Retrying a prepared job rechecks and repairs the embedded bridge installation before reporting its current health.
 
 ---
 
@@ -2224,7 +2224,7 @@ Idempotently inspect a calendar job.
 { job_id: string; validate_rows?: boolean }
 ```
 
-States are `prepared`, `running`, `complete`, `partial`, `failed`, `validated`, `invalid`, and `ready`. The result includes progress, row count, filters, requested/observed coverage, checksum, and machine-readable errors. `partial` is structurally valid but must never be presented as complete historical coverage.
+States are `prepared`, `running`, `complete`, `partial`, `failed`, `validated`, `invalid`, and `ready`. The result includes progress, row count, filters, requested/observed coverage, checksum, and machine-readable errors. `partial` is structurally valid but must never be presented as complete historical coverage. Running jobs use a persistent request identity; after an MCP process restart, prepare or inspect reconciles the Service's completed response instead of leaving the job stuck.
 
 ---
 
@@ -2240,7 +2240,7 @@ Publish a structurally validated job as a versioned CSV plus checksum manifest u
 }
 ```
 
-The CSV v1 fixed columns preserve raw MT5 scaled `int64` values. Empty `actual`, `previous`, `revised_previous`, or `forecast` fields mean missing (`LONG_MIN`); zero remains `0`. EAs load the dataset through `<MT5-MCP-Quant/CalendarStaticProvider.mqh>`. Schema/checksum mismatches and broker/server mismatches are rejected by default.
+The CSV v1 fixed columns preserve raw MT5 scaled `int64` values. Empty `actual`, `previous`, `revised_previous`, or `forecast` fields mean missing (`LONG_MIN`); zero remains `0`. EAs load the dataset through `<MT5-MCP-Quant/CalendarStaticProvider.mqh>`. Schema/checksum mismatches and broker/server mismatches are rejected by default. A `ready` export may publish multiple named datasets. Provider deployment, dataset replacement, and job metadata update are ordered transactionally so a failed publish does not leave a misleading final dataset directory.
 
 ---
 
