@@ -346,8 +346,10 @@ impl BridgeClient {
         self.read_response(request_id, true)
     }
 
-    pub fn take_calendar_response(&self, job_id: &str) -> Result<Option<BridgeResponse>> {
-        validate_id(job_id)?;
+    pub fn take_response_matching<F>(&self, mut matches: F) -> Result<Option<BridgeResponse>>
+    where
+        F: FnMut(&BridgeResponse) -> bool,
+    {
         let responses_dir = self.root.join("responses");
         let mut response_ids = fs::read_dir(&responses_dir)
             .map(|entries| {
@@ -367,7 +369,6 @@ impl BridgeClient {
             })
             .unwrap_or_default();
         response_ids.sort();
-        let expected_raw = format!("mt5-mcp-quant/calendar/jobs/{}/raw.csv", job_id);
         for request_id in response_ids {
             if validate_id(&request_id).is_err() {
                 continue;
@@ -375,12 +376,7 @@ impl BridgeClient {
             let Ok(Some(response)) = self.read_response(&request_id, false) else {
                 continue;
             };
-            if response
-                .get("raw_file")
-                .map(|value| value.replace('\\', "/"))
-                .as_deref()
-                != Some(expected_raw.as_str())
-            {
+            if !matches(&response) {
                 continue;
             }
             let path = responses_dir.join(format!("{}.res", request_id));
