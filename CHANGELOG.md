@@ -4,6 +4,8 @@ All notable changes to MT5-MCP-Quant are documented here.
 
 ## [Unreleased]
 
+## [1.35.1] - 2026-09-04
+
 ### Fixed
 
 - Prevented legitimate symbols ending in uppercase `C` from being misclassified as cent-account aliases while preserving case-insensitive `.C` and `.CENT` aliases.
@@ -36,4 +38,6 @@ All notable changes to MT5-MCP-Quant are documented here.
 - Added structured requested/resolved symbol context and actionable no-history/no-match failures.
 - Standardized FILE_COMMON protocol timestamps on UTC and reject implausibly future heartbeats, preventing false-ready health and immediately expired requests on non-UTC Windows systems.
 
+[Unreleased]: https://github.com/severus-sys/mt5-mcp-quant/compare/v1.35.1...HEAD
+[1.35.1]: https://github.com/severus-sys/mt5-mcp-quant/compare/v1.35.0...v1.35.1
 [1.35.0]: https://github.com/severus-sys/mt5-mcp-quant/releases/tag/v1.35.0
