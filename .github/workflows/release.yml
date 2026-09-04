@@ -282,6 +282,7 @@ jobs:
           with open('server.json', encoding='utf-8') as source:
               data = json.load(source)
           assert data['version'] == '${{ github.event.inputs.version || github.ref_name }}'.lstrip('v')
+          assert len(data.get('description', '')) <= 100
           for package in data.get('packages', []):
               assert re.fullmatch(r'[a-f0-9]{64}', package.get('fileSha256', ''))
               assert package.get('identifier', '').endswith('windows-x64.mcpb')
