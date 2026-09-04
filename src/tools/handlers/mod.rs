@@ -10,6 +10,7 @@ type NotificationCallback = Arc<dyn Fn(&str, serde_json::Value) + Send + Sync>;
 
 mod analysis;
 mod backtest;
+mod calendar;
 mod experts;
 mod market_watch;
 mod optimization;
@@ -66,6 +67,15 @@ impl ToolHandler {
             "update" => system::handle_update(&self.config, args).await,
             "ensure_market_watch_symbol" => {
                 market_watch::handle_ensure_market_watch_symbol(&self.config, args).await
+            }
+            "prepare_calendar_export" => {
+                calendar::handle_prepare_calendar_export(&self.config, args).await
+            }
+            "inspect_calendar_export" => {
+                calendar::handle_inspect_calendar_export(&self.config, args).await
+            }
+            "prepare_calendar_backtest_dataset" => {
+                calendar::handle_prepare_calendar_backtest_dataset(&self.config, args).await
             }
 
             // Expert/Indicator/Script handlers

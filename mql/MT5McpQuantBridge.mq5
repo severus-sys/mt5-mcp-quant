@@ -449,6 +449,7 @@ void HandleExportCalendar(const string request_id,const string &request_keys[],c
    WriteFieldsAtomic(g_root+"\\responses\\"+request_id+".res",keys,values);
   }
 
+
 void ProcessRequest(const string file_name)
   {
    int suffix=StringFind(file_name,".req");
@@ -480,10 +481,44 @@ void ProcessRequest(const string file_name)
    else if(operation=="ensure_selected_exact")
       HandleEnsureSelected(request_id,FieldValue(keys,values,"symbol"));
    else if(operation=="export_calendar")
-      RespondError(request_id,"calendar_not_implemented","Calendar export support is not installed in this Service build.");
+      HandleExportCalendar(request_id,keys,values);
    else
       RespondError(request_id,"operation_not_allowed","Operation is not allowlisted.");
    FileDelete(path,FILE_COMMON);
+  }
+
+void ProcessUrgentRequests(const string active_request_id)
+  {
+   string file_name;
+   long search=FileFindFirst(g_root+"\\requests\\*.req",file_name,FILE_COMMON);
+   if(search==INVALID_HANDLE)
+      return;
+   do
+     {
+      int suffix=StringFind(file_name,".req");
+      string request_id=suffix>0 ? StringSubstr(file_name,0,suffix) : "";
+      if(request_id==active_request_id || !IsSafeId(request_id))
+         continue;
+      string keys[],values[];
+      if(!ReadFields(g_root+"\\requests\\"+file_name,keys,values))
+         continue;
+      string operation=FieldValue(keys,values,"operation");
+      if(operation=="list_server_symbols" || operation=="ensure_selected_exact")
+         ProcessRequest(file_name);
+     }
+   while(FileFindNext(search,file_name));
+   FileFindClose(search);
+  }
+
+long RequestCreatedEpoch(const string file_name)
+  {
+   string keys[],values[];
+   if(!ReadFields(g_root+"\\requests\\"+file_name,keys,values))
+      return LONG_MAX;
+   long created=(long)StringToInteger(FieldValue(keys,values,"created_epoch_ms"));
+   if(created<=0)
+      created=(long)StringToInteger(FieldValue(keys,values,"created_epoch"))*1000;
+   return created>0 ? created : LONG_MAX;
   }
 
 void ProcessRequests()
@@ -492,14 +527,35 @@ void ProcessRequests()
    long search=FileFindFirst(g_root+"\\requests\\*.req",file_name,FILE_COMMON);
    if(search==INVALID_HANDLE)
       return;
+   string files[];
+   long created[];
    do
      {
-      ProcessRequest(file_name);
-      if(TimeLocal()-g_last_heartbeat>=1)
-         WriteHeartbeat();
+      int next=ArraySize(files);
+      ArrayResize(files,next+1);
+      ArrayResize(created,next+1);
+      files[next]=file_name;
+      created[next]=RequestCreatedEpoch(file_name);
      }
    while(FileFindNext(search,file_name));
    FileFindClose(search);
+   for(int left=0; left<ArraySize(files); left++)
+      for(int right=left+1; right<ArraySize(files); right++)
+         if(created[right]<created[left] || (created[right]==created[left] && files[right]<files[left]))
+           {
+            long created_swap=created[left];
+            created[left]=created[right];
+            created[right]=created_swap;
+            string file_swap=files[left];
+            files[left]=files[right];
+            files[right]=file_swap;
+           }
+   for(int index=0; index<ArraySize(files); index++)
+     {
+      ProcessRequest(files[index]);
+      if(TimeLocal()-g_last_heartbeat>=1)
+         WriteHeartbeat();
+     }
   }
 
 int OnStart(void)
