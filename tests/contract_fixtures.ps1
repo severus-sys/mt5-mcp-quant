@@ -41,6 +41,8 @@ Assert-Contract ($service.Contains($csvColumns)) 'Calendar CSV v1 schema changed
 foreach ($method in @('Load(', 'ValueHistory(', 'HasEventWindow(', 'LastError(')) {
     Assert-Contract ($provider.Contains($method)) "Calendar provider method missing: $method"
 }
+Assert-Contract ($provider.Contains('m_last_error="broker_mismatch"')) 'Calendar provider must reject broker/server mismatches by default'
+Assert-Contract (-not $provider.Contains('instance_mismatch')) 'Strategy Tester data-path identity must not be treated as a broker mismatch'
 foreach ($function in @('CsvText', 'RawCalendarValue', 'ImportanceAllowed', 'NextMonth', 'WriteCalendarProgress', 'WriteCalendarRow', 'ExportCalendarSlice', 'HandleExportCalendar')) {
     $count = [regex]::Matches($service, "(?m)^(?:string|bool|datetime|void) $function\(").Count
     Assert-Contract ($count -eq 1) "MQL Service function $function must have exactly one definition; found $count"
