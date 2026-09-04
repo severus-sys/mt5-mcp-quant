@@ -77,6 +77,9 @@ if (-not $ProjectDir) { $ProjectDir = $repoRoot }
 $expertsDir = Join-Path $DataDir 'MQL5\Experts'
 $indicatorsDir = Join-Path $DataDir 'MQL5\Indicators'
 $scriptsDir = Join-Path $DataDir 'MQL5\Scripts'
+$servicesDir = Join-Path $DataDir 'MQL5\Services'
+$includeDir = Join-Path $DataDir 'MQL5\Include'
+$terminalCommonDataDir = Join-Path (Split-Path -Parent $DataDir) 'Common'
 $profilesDir = Join-Path $DataDir 'MQL5\Profiles\Tester'
 $testerDir = Join-Path $DataDir 'Tester'
 $reportsDir = Join-Path $repoRoot 'reports'
@@ -88,7 +91,7 @@ if ((Test-Path -LiteralPath $configPath) -and -not $Force) {
     exit 0
 }
 
-New-Item -ItemType Directory -Force -Path (Split-Path -Parent $configPath), $profilesDir, $reportsDir, $logDir | Out-Null
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $configPath), $profilesDir, $servicesDir, $includeDir, $terminalCommonDataDir, $reportsDir, $logDir | Out-Null
 
 $yaml = @"
 # mt5-mcp-quant native Windows configuration
@@ -97,6 +100,9 @@ data_dir: $(Quote-Yaml $DataDir)
 experts_dir: $(Quote-Yaml $expertsDir)
 indicators_dir: $(Quote-Yaml $indicatorsDir)
 scripts_dir: $(Quote-Yaml $scriptsDir)
+services_dir: $(Quote-Yaml $servicesDir)
+include_dir: $(Quote-Yaml $includeDir)
+terminal_common_data_dir: $(Quote-Yaml $terminalCommonDataDir)
 tester_profiles_dir: $(Quote-Yaml $profilesDir)
 tester_cache_dir: $(Quote-Yaml $testerDir)
 display_mode: gui

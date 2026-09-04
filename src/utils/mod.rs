@@ -46,6 +46,59 @@ pub fn make_writable(path: &std::path::Path) {
     let _ = set_readonly(path, false);
 }
 
+/// Publish bytes through a sibling temporary file and an atomic replace.
+pub fn atomic_write(path: &std::path::Path, contents: &[u8]) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("Invalid destination: {}", path.display()))?;
+    let temporary = path.with_file_name(format!(
+        "{}.tmp-{}-{}",
+        file_name,
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::write(&temporary, contents)?;
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        };
+        let from: Vec<u16> = temporary
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let to: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let moved = unsafe {
+            MoveFileExW(
+                from.as_ptr(),
+                to.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if moved == 0 {
+            let error = std::io::Error::last_os_error();
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error.into());
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    std::fs::rename(&temporary, path)?;
+
+    Ok(())
+}
+
 #[cfg(target_os = "windows")]
 fn tasklist_rows(output: &[u8]) -> Vec<(String, u32)> {
     String::from_utf8_lossy(output)
@@ -331,6 +384,16 @@ mod tests {
             .expect("metadata")
             .permissions()
             .readonly());
+    }
+
+    #[test]
+    fn atomic_write_replaces_existing_content() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("state.json");
+        atomic_write(&path, b"one").expect("initial publish");
+        atomic_write(&path, b"two").expect("replacement publish");
+        assert_eq!(std::fs::read(&path).unwrap(), b"two");
+        assert!(!directory.path().join("state.json.tmp").exists());
     }
 
     #[cfg(target_os = "windows")]

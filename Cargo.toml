@@ -39,3 +39,6 @@ roxmltree = "0.21.1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 base64 = "0.23"
 sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }

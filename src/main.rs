@@ -1,4 +1,5 @@
 mod analytics;
+mod bridge;
 mod compile;
 mod models;
 mod optimization;

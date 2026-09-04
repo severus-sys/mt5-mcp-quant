@@ -93,6 +93,11 @@ pub struct Config {
     pub experts_dir: Option<String>,
     pub indicators_dir: Option<String>,
     pub scripts_dir: Option<String>,
+    pub services_dir: Option<String>,
+    pub include_dir: Option<String>,
+    /// MetaTrader's shared Terminal/Common directory. FILE_COMMON files live
+    /// under its Files child and are accessible from both terminal and tester.
+    pub terminal_common_data_dir: Option<String>,
     pub tester_profiles_dir: Option<String>,
     pub tester_cache_dir: Option<String>,
     pub display_mode: Option<String>,
@@ -122,6 +127,9 @@ impl Default for Config {
             experts_dir: None,
             indicators_dir: None,
             scripts_dir: None,
+            services_dir: None,
+            include_dir: None,
+            terminal_common_data_dir: None,
             tester_profiles_dir: None,
             tester_cache_dir: None,
             display_mode: None,
@@ -247,6 +255,22 @@ impl Config {
                     .to_string_lossy()
                     .to_string(),
             );
+            cfg.services_dir = Some(
+                mt5_dir
+                    .join("MQL5")
+                    .join("Services")
+                    .to_string_lossy()
+                    .to_string(),
+            );
+            cfg.include_dir = Some(
+                mt5_dir
+                    .join("MQL5")
+                    .join("Include")
+                    .to_string_lossy()
+                    .to_string(),
+            );
+            cfg.terminal_common_data_dir = Self::find_terminal_common_data_dir(&home)
+                .map(|path| path.to_string_lossy().to_string());
             cfg.tester_profiles_dir = Some(
                 mt5_dir
                     .join("MQL5")
@@ -475,6 +499,9 @@ impl Config {
              experts_dir: {exp}\n\
              indicators_dir: {ind}\n\
              scripts_dir: {scr}\n\
+             services_dir: {svc}\n\
+             include_dir: {inc}\n\
+             terminal_common_data_dir: {common}\n\
              tester_profiles_dir: {prof}\n\
              tester_cache_dir: {cache}\n\
              display_mode: {disp}\n\
@@ -496,6 +523,9 @@ impl Config {
             exp = s(&self.experts_dir),
             ind = s(&self.indicators_dir),
             scr = s(&self.scripts_dir),
+            svc = s(&self.services_dir),
+            inc = s(&self.include_dir),
+            common = s(&self.terminal_common_data_dir),
             prof = s(&self.tester_profiles_dir),
             cache = s(&self.tester_cache_dir),
             disp = s(&self.display_mode),
@@ -551,6 +581,9 @@ impl Config {
             experts_dir: map.get("experts_dir").cloned(),
             indicators_dir: map.get("indicators_dir").cloned(),
             scripts_dir: map.get("scripts_dir").cloned(),
+            services_dir: map.get("services_dir").cloned(),
+            include_dir: map.get("include_dir").cloned(),
+            terminal_common_data_dir: map.get("terminal_common_data_dir").cloned(),
             tester_profiles_dir: map.get("tester_profiles_dir").cloned(),
             tester_cache_dir: map.get("tester_cache_dir").cloned(),
             display_mode: map.get("display_mode").cloned(),
@@ -580,6 +613,12 @@ impl Config {
             "terminal_dir" => self.terminal_dir.clone().unwrap_or_default(),
             "data_dir" => self.data_dir.clone().unwrap_or_default(),
             "experts_dir" => self.experts_dir.clone().unwrap_or_default(),
+            "services_dir" => self.services_dir().to_string_lossy().to_string(),
+            "include_dir" => self.include_dir().to_string_lossy().to_string(),
+            "terminal_common_data_dir" => self
+                .terminal_common_data_dir()
+                .map(|path| path.to_string_lossy().to_string())
+                .unwrap_or_default(),
             "tester_profiles_dir" => self.tester_profiles_dir.clone().unwrap_or_default(),
             "tester_cache_dir" => self.tester_cache_dir.clone().unwrap_or_default(),
             "display_mode" => self
@@ -731,6 +770,56 @@ impl Config {
     pub fn metatester_executable(&self) -> Option<PathBuf> {
         self.terminal_install_dir()
             .map(|dir| dir.join("metatester64.exe"))
+    }
+
+    fn find_terminal_common_data_dir(home: &Path) -> Option<PathBuf> {
+        #[cfg(target_os = "windows")]
+        {
+            let app_data = std::env::var("APPDATA")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| home.join("AppData").join("Roaming"));
+            return Some(app_data.join("MetaQuotes").join("Terminal").join("Common"));
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = home;
+            None
+        }
+    }
+
+    pub fn services_dir(&self) -> PathBuf {
+        self.services_dir
+            .as_ref()
+            .map(PathBuf::from)
+            .or_else(|| {
+                self.mt5_dir()
+                    .map(|path| path.join("MQL5").join("Services"))
+            })
+            .unwrap_or_else(|| PathBuf::from("MQL5").join("Services"))
+    }
+
+    pub fn include_dir(&self) -> PathBuf {
+        self.include_dir
+            .as_ref()
+            .map(PathBuf::from)
+            .or_else(|| self.mt5_dir().map(|path| path.join("MQL5").join("Include")))
+            .unwrap_or_else(|| PathBuf::from("MQL5").join("Include"))
+    }
+
+    pub fn terminal_common_data_dir(&self) -> Option<PathBuf> {
+        self.terminal_common_data_dir
+            .as_ref()
+            .map(PathBuf::from)
+            .or_else(|| {
+                let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+                Self::find_terminal_common_data_dir(&home)
+            })
+    }
+
+    pub fn terminal_common_files_dir(&self) -> Option<PathBuf> {
+        self.terminal_common_data_dir()
+            .map(|path| path.join("Files"))
     }
 
     pub const fn requires_wine() -> bool {
@@ -914,6 +1003,27 @@ mod tests {
         assert_eq!(
             config.terminal_dir.as_deref(),
             Some("C:\\Program Files\\MetaTrader 5")
+        );
+    }
+
+    #[test]
+    fn old_configs_derive_service_and_include_directories() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("mt5-mcp-quant.yaml");
+        fs::write(
+            &path,
+            format!("data_dir: '{}'\n", directory.path().display()),
+        )
+        .expect("write old config");
+
+        let config = Config::parse_file(&path).expect("parse old config");
+        assert_eq!(
+            config.services_dir(),
+            directory.path().join("MQL5").join("Services")
+        );
+        assert_eq!(
+            config.include_dir(),
+            directory.path().join("MQL5").join("Include")
         );
     }
 
