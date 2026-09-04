@@ -41,7 +41,7 @@ That produces an optimized binary at `target\debug\deps\mt5-mcp-quant-release.ex
 
 ## Verify the Windows build
 
-Run the native smoke test and the complete 92-tool contract/semantic suite:
+Run the native smoke test and the complete 96-tool contract/semantic suite:
 
 ```powershell
 .\tests\integration_test.ps1 -Binary .\target\release\mt5-mcp-quant.exe
@@ -80,5 +80,7 @@ Run a backtest on MyEA from 2025.01.01 to 2025.03.31
 ```
 
 The pipeline runs: compile → clean → native MT5 backtest → extract → analyze.
+
+For Market Watch or calendar export, inspect `verify_setup.mql_bridge`. The server installs and compiles the embedded Service automatically. Start `MT5McpQuantBridge` once in MT5 Navigator → Services → MT5-MCP-Quant; after that, agents use it through the allowlisted FILE_COMMON protocol without per-request UI automation.
 
 See [CONFIG.md](CONFIG.md), [TROUBLESHOOTING.md](TROUBLESHOOTING.md), and [MCP_TOOLS.md](MCP_TOOLS.md).

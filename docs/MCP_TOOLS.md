@@ -2,7 +2,7 @@
 
 Full input/output schemas for MT5-MCP-Quant tools.
 
-> **Documentation Status:** All 92 tools are documented.
+> **Documentation Status:** All 96 tools are documented.
 
 ---
 
@@ -2151,9 +2151,9 @@ set_from_optimization(                  → map results[0].params → clean back
 
 ## `list_symbols`
 
-List all available symbols in the MT5 terminal.
+List symbols that have local Strategy Tester history for the active server.
 
-**When to call:** To verify a symbol is available before running backtests, or to discover available symbols.
+**When to call:** To discover symbols with tester history. This is intentionally not the complete broker catalog and does not report Market Watch membership.
 
 ### Input schema
 
@@ -2168,14 +2168,79 @@ List all available symbols in the MT5 terminal.
 ```typescript
 {
   success: boolean;
-  symbols: Array<{
-    name: string;          // e.g. "XAUUSD", "EURUSD"
-    description?: string;   // Symbol description
-    visible: boolean;       // Whether symbol is visible in Market Watch
-  }>;
+  count: number;
+  symbols: string[];        // e.g. ["XAUUSD", "EURUSDm"]
+  active_server?: string;
+  available_servers: string[];
+  hint: string;
   error?: string;
 }
 ```
+
+---
+
+## `ensure_market_watch_symbol`
+
+Resolve a natural or exact symbol against the active broker's complete catalog, select the exact result in Market Watch, and verify it.
+
+**When to call:** Before live symbol operations, after MT5 error 4302, or when a broker may use a suffix/prefix such as `EURUSDm`. The resolver never picks an arbitrary candidate when aliases are ambiguous.
+
+```typescript
+{
+  symbol: string;
+  timeout_ms?: number; // default 5000; range 500–30000
+}
+```
+
+Success includes `requested_symbol`, `resolved_symbol`, `symbol_resolution`, `already_selected`, `selected`, `visible`, and `synchronized`. Ambiguous/no-match failures include a machine-readable code and sorted candidates.
+
+---
+
+## `prepare_calendar_export`
+
+Create or reuse a persistent asynchronous export job for the active broker's live economic calendar.
+
+```typescript
+{
+  currencies?: string[];     // OR within this list
+  country_codes?: string[];  // OR within this list; AND with currencies
+  importance?: ("low" | "moderate" | "high")[];
+  from: string;              // YYYY-MM-DDTHH:MM:SS broker server time
+  to: string;                // exclusive, same time semantics
+  output_format?: "csv";
+  overwrite?: boolean;
+}
+```
+
+At least one currency or country is required. Do not append `Z` or a UTC offset. The normalized filter fingerprint makes repeated preparation idempotent. A ready Service starts the job automatically; otherwise it remains `prepared` and returns one-time startup instructions.
+
+---
+
+## `inspect_calendar_export`
+
+Idempotently inspect a calendar job.
+
+```typescript
+{ job_id: string; validate_rows?: boolean }
+```
+
+States are `prepared`, `running`, `complete`, `partial`, `failed`, `validated`, `invalid`, and `ready`. The result includes progress, row count, filters, requested/observed coverage, checksum, and machine-readable errors. `partial` is structurally valid but must never be presented as complete historical coverage.
+
+---
+
+## `prepare_calendar_backtest_dataset`
+
+Publish a structurally validated job as a versioned CSV plus checksum manifest under MT5 `FILE_COMMON`.
+
+```typescript
+{
+  job_id: string;
+  dataset_name: string; // 1–64 characters: letters, digits, dot, dash, underscore
+  overwrite?: boolean;
+}
+```
+
+The CSV v1 fixed columns preserve raw MT5 scaled `int64` values. Empty `actual`, `previous`, `revised_previous`, or `forecast` fields mean missing (`LONG_MIN`); zero remains `0`. EAs load the dataset through `<MT5-MCP-Quant/CalendarStaticProvider.mqh>`. Schema/checksum mismatches and broker/server mismatches are rejected by default.
 
 ---
 

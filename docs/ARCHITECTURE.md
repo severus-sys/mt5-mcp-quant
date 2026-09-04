@@ -10,6 +10,8 @@
 
 **Program/data separation.** Native MT5 keeps executables under Program Files and instance data under `%APPDATA%\MetaQuotes\Terminal`. `Config` models these as `terminal_dir` and `data_dir`; all MQL5, tester, report, and account paths derive from `data_dir`.
 
+**Allowlisted native bridge.** Market Watch and live economic-calendar access run inside one embedded MQL5 Service. Rust and the Service exchange versioned, terminal-instance-bound files under `FILE_COMMON`; the allowlist contains only symbol catalog, exact selection, and calendar export operations.
+
 ---
 
 ## Component Map
@@ -28,33 +30,41 @@ MT5-MCP-Quant/
 │   │   ├── extract.rs          # HTML/XML report parser → metrics.json (deals → DB)
 │   │   └── analyze.rs          # Deal-level analysis engine → analysis.json
 │   ├── compile/                # MQL5 compilation
-│   │   └── mql_compiler.rs   # Native MetaEditor CLI wrapper
+│   │   └── mql_compiler.rs     # Expert/Indicator/Script/Service compiler + Include deployer
+│   ├── bridge.rs               # FILE_COMMON protocol, heartbeat, identity and deployment
 │   ├── pipeline/               # Backtest orchestration
 │   │   ├── backtest.rs         # 5-stage pipeline (COMPILE→CLEAN→BACKTEST→EXTRACT→ANALYZE)
 │   │   └── stages.rs           # Pipeline stage definitions
 │   ├── storage/                # SQLite persistence
 │   │   └── database.rs         # ReportDb: reports table + deals table
 │   └── tools/                  # MCP tool definitions
-│       ├── definitions/        # Tool schemas (11 domain modules, 92 tools)
+│       ├── definitions/        # Tool schemas (12 domain modules, 96 tools)
 │       │   ├── mod.rs
 │       │   ├── analytics.rs      # 19 analysis tools (DB-backed)
 │       │   ├── backtest.rs       # 7 backtest tools
 │       │   ├── baseline.rs       # 1 baseline tool
 │       │   ├── experts.rs        # 9 EA/indicator/script tools
+│       │   ├── market_watch.rs   # 1 broker catalog / Market Watch tool
+│       │   ├── calendar.rs       # 3 calendar export / dataset tools
 │       │   ├── optimization.rs   # 4 optimization tools
 │       │   ├── reports.rs        # 20 report management tools
 │       │   ├── setfiles.rs       # 8 .set file tools
 │       │   └── system.rs         # 6 system tools
-│       └── handlers/             # Tool dispatch (9 domain modules)
+│       └── handlers/             # Tool dispatch (11 domain modules)
 │           ├── mod.rs
 │           ├── analysis.rs
 │           ├── backtest.rs
 │           ├── experts.rs
+│           ├── market_watch.rs
+│           ├── calendar.rs
 │           ├── optimization.rs
 │           ├── reports.rs
 │           ├── setfiles.rs
 │           └── system.rs
 │
+├── mql/
+│   ├── MT5McpQuantBridge.mq5     # Chart-independent MQL5 Service
+│   └── CalendarStaticProvider.mqh # Checksummed Strategy Tester provider
 ├── scripts/
 │   ├── setup.ps1               # Auto-detect native MT5 program/data paths
 │   ├── setup.sh                # Legacy macOS/Linux setup

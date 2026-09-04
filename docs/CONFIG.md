@@ -27,6 +27,9 @@ data_dir: 'C:\Users\you\AppData\Roaming\MetaQuotes\Terminal\INSTANCE_ID'
 experts_dir: 'C:\Users\you\AppData\Roaming\MetaQuotes\Terminal\INSTANCE_ID\MQL5\Experts'
 indicators_dir: 'C:\Users\you\AppData\Roaming\MetaQuotes\Terminal\INSTANCE_ID\MQL5\Indicators'
 scripts_dir: 'C:\Users\you\AppData\Roaming\MetaQuotes\Terminal\INSTANCE_ID\MQL5\Scripts'
+services_dir: 'C:\Users\you\AppData\Roaming\MetaQuotes\Terminal\INSTANCE_ID\MQL5\Services'
+include_dir: 'C:\Users\you\AppData\Roaming\MetaQuotes\Terminal\INSTANCE_ID\MQL5\Include'
+terminal_common_data_dir: 'C:\Users\you\AppData\Roaming\MetaQuotes\Terminal\Common'
 tester_profiles_dir: 'C:\Users\you\AppData\Roaming\MetaQuotes\Terminal\INSTANCE_ID\MQL5\Profiles\Tester'
 tester_cache_dir: 'C:\Users\you\AppData\Roaming\MetaQuotes\Terminal\INSTANCE_ID\Tester'
 
@@ -47,3 +50,5 @@ opt_max_agents: 0
 ```
 
 Run `scripts\setup.ps1` whenever the MT5 installation or active data instance changes. The script matches `%APPDATA%` instances through `origin.txt` and falls back to the most recently used instance.
+
+The three bridge paths are optional in older YAML files and are derived automatically from `data_dir` and the MetaQuotes common-data location. `services_dir` receives the embedded Service, `include_dir` receives the static calendar provider, and `terminal_common_data_dir\Files` carries the versioned request/response protocol and datasets.
