@@ -10,12 +10,22 @@ on:
         required: true
         type: string
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   build-windows:
     runs-on: windows-latest
+    env:
+      RELEASE_TAG: ${{ github.event.inputs.version || github.ref_name }}
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
 
       - name: Cache Cargo
         uses: actions/cache@v4
@@ -27,11 +37,28 @@ jobs:
           key: windows-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: windows-cargo-
 
-      - name: Test
-        run: cargo test --all-targets --verbose
+      - name: Verify release version
+        shell: pwsh
+        run: |
+          $tagVersion = $env:RELEASE_TAG.TrimStart('v')
+          $cargoVersion = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"$').Matches[0].Groups[1].Value
+          if ($tagVersion -ne $cargoVersion) { throw "Tag $tagVersion does not match Cargo $cargoVersion" }
+
+      - name: Format, check, lint, and test
+        run: |
+          cargo fmt --all -- --check
+          cargo check --all-targets
+          cargo clippy --all-targets -- -D warnings
+          cargo test --all-targets
 
       - name: Build release binary
         run: cargo build --release
+
+      - name: Validate exact 96-tool release binary
+        shell: pwsh
+        run: |
+          ./tests/contract_fixtures.ps1
+          ./tests/e2e_all_tools.ps1 -Binary ./target/release/mt5-mcp-quant.exe -ContractOnly
 
       - name: Package native Windows MCP server
         shell: pwsh
@@ -41,28 +68,113 @@ jobs:
           Copy-Item target/release/mt5-mcp-quant.exe $package/
           Copy-Item config $package/config -Recurse
           Copy-Item docs $package/docs -Recurse
+          Copy-Item mql $package/mql -Recurse
+          Copy-Item skills $package/skills -Recurse
           New-Item -ItemType Directory -Force -Path $package/scripts | Out-Null
-          Copy-Item scripts/setup.ps1,scripts/build-windows.ps1 $package/scripts/
-          Copy-Item README.md,server.json $package/
+          Copy-Item scripts/*.ps1 $package/scripts/
+          New-Item -ItemType Directory -Force -Path $package/tests/fixtures | Out-Null
+          Copy-Item tests/*.ps1,tests/e2e_all_tools.sh $package/tests/
+          Copy-Item tests/fixtures/CalendarProviderCompileEA.mq5 $package/tests/fixtures/
+          Copy-Item README.md,LICENSE,CHANGELOG.md $package/
+
+          $packageManifest = Get-Content server.json -Raw | ConvertFrom-Json
+          $version = $env:RELEASE_TAG.TrimStart('v')
+          $packageManifest.version = $version
+          foreach ($entry in $packageManifest.packages) {
+            $entry.version = $version
+            $entry.identifier = "https://github.com/severus-sys/mt5-mcp-quant/releases/download/v$version/mt5-mcp-quant-windows-x64.mcpb"
+            if ($entry.PSObject.Properties.Name -contains 'fileSha256') {
+              $entry.PSObject.Properties.Remove('fileSha256')
+            }
+          }
+          $packageManifest | ConvertTo-Json -Depth 20 | Set-Content -Path $package/server.json -Encoding utf8
+
+          $bundleManifest = [ordered]@{
+            manifest_version = '0.3'
+            name = 'mt5-mcp-quant'
+            display_name = 'MT5-MCP-Quant'
+            version = $version
+            description = 'Native Windows MCP server for MetaTrader 5 research, backtesting, and analytics.'
+            author = [ordered]@{
+              name = 'MT5-MCP-Quant contributors'
+              url = 'https://github.com/severus-sys/mt5-mcp-quant'
+            }
+            server = [ordered]@{
+              type = 'binary'
+              entry_point = 'mt5-mcp-quant.exe'
+              mcp_config = [ordered]@{
+                command = '${__dirname}/mt5-mcp-quant.exe'
+                args = @('--stdio')
+                env = @{}
+              }
+            }
+            tools_generated = $true
+            keywords = @('mt5', 'mql5', 'trading', 'backtest', 'windows')
+            license = 'MIT'
+            compatibility = [ordered]@{ platforms = @('win32') }
+            repository = [ordered]@{
+              type = 'git'
+              url = 'https://github.com/severus-sys/mt5-mcp-quant'
+            }
+          }
+          $bundleManifest | ConvertTo-Json -Depth 20 | Set-Content -Path $package/manifest.json -Encoding utf8
+
           tar -czf dist/mcp-mt5-mcp-quant-windows-x64.tar.gz -C dist mcp-mt5-mcp-quant-windows
+          npx --yes @anthropic-ai/mcpb@2.1.2 pack $package dist/mt5-mcp-quant-windows-x64.mcpb
+          $archiveSha = (Get-FileHash dist/mcp-mt5-mcp-quant-windows-x64.tar.gz -Algorithm SHA256).Hash.ToLowerInvariant()
+          $mcpbSha = (Get-FileHash dist/mt5-mcp-quant-windows-x64.mcpb -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$archiveSha  mcp-mt5-mcp-quant-windows-x64.tar.gz" | Set-Content dist/mcp-mt5-mcp-quant-windows-x64.tar.gz.sha256 -Encoding ascii
+          "$mcpbSha  mt5-mcp-quant-windows-x64.mcpb" | Set-Content dist/mt5-mcp-quant-windows-x64.mcpb.sha256 -Encoding ascii
+
+      - name: Verify release archive
+        shell: pwsh
+        run: |
+          $listing = tar -tzf dist/mcp-mt5-mcp-quant-windows-x64.tar.gz
+          $prefix = 'mcp-mt5-mcp-quant-windows/'
+          foreach ($required in @(
+            'mt5-mcp-quant.exe', 'README.md', 'LICENSE', 'CHANGELOG.md', 'server.json', 'manifest.json',
+            'config/mt5-mcp-quant.example.yaml', 'mql/MT5McpQuantBridge.mq5',
+            'mql/CalendarStaticProvider.mqh', 'scripts/setup.ps1',
+            'scripts/install-agent-skills.ps1', 'skills/mt5-mcp-quant-calendar-data/SKILL.md',
+            'tests/e2e_all_tools.ps1'
+          )) {
+            if ($listing -notcontains "$prefix$required") { throw "Release archive is missing $required" }
+          }
+          $expected = (Get-Content dist/mcp-mt5-mcp-quant-windows-x64.tar.gz.sha256).Split(' ')[0]
+          $actual = (Get-FileHash dist/mcp-mt5-mcp-quant-windows-x64.tar.gz -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($expected -ne $actual) { throw 'Release checksum verification failed' }
+
+          $mcpbListing = tar -tf dist/mt5-mcp-quant-windows-x64.mcpb
+          foreach ($required in @(
+            'manifest.json', 'mt5-mcp-quant.exe', 'README.md', 'LICENSE',
+            'mql/MT5McpQuantBridge.mq5', 'mql/CalendarStaticProvider.mqh',
+            'skills/mt5-mcp-quant-calendar-data/SKILL.md'
+          )) {
+            if ($mcpbListing -notcontains $required) { throw "MCPB is missing $required" }
+          }
+          $manifest = (tar -xOf dist/mt5-mcp-quant-windows-x64.mcpb manifest.json) | ConvertFrom-Json
+          if ($manifest.manifest_version -ne '0.3' -or $manifest.server.type -ne 'binary') {
+            throw 'MCPB manifest is invalid'
+          }
+          if ($manifest.server.mcp_config.args.Count -ne 1 -or $manifest.server.mcp_config.args[0] -ne '--stdio') {
+            throw 'MCPB stdio command is invalid'
+          }
+          $mcpbExpected = (Get-Content dist/mt5-mcp-quant-windows-x64.mcpb.sha256).Split(' ')[0]
+          $mcpbActual = (Get-FileHash dist/mt5-mcp-quant-windows-x64.mcpb -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($mcpbExpected -ne $mcpbActual) { throw 'MCPB checksum verification failed' }
 
       - uses: actions/upload-artifact@v4
         with:
-          name: windows-binary
-          path: dist/mcp-mt5-mcp-quant-windows-x64.tar.gz
-
-  cargo-publish:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Publish crate
-        run: cargo publish --no-verify --allow-dirty
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          name: windows-release
+          path: |
+            dist/mcp-mt5-mcp-quant-windows-x64.tar.gz
+            dist/mcp-mt5-mcp-quant-windows-x64.tar.gz.sha256
+            dist/mt5-mcp-quant-windows-x64.mcpb
+            dist/mt5-mcp-quant-windows-x64.mcpb.sha256
+          if-no-files-found: error
 
   release:
-    needs: [build-windows, cargo-publish]
+    needs: build-windows
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -71,13 +183,17 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: windows-binary
+          name: windows-release
           path: dist
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           name: ${{ env.RELEASE_TAG }}
-          files: dist/mcp-mt5-mcp-quant-windows-x64.tar.gz
+          files: |
+            dist/mcp-mt5-mcp-quant-windows-x64.tar.gz
+            dist/mcp-mt5-mcp-quant-windows-x64.tar.gz.sha256
+            dist/mt5-mcp-quant-windows-x64.mcpb
+            dist/mt5-mcp-quant-windows-x64.mcpb.sha256
           generate_release_notes: true
 
   update-server-manifest:
@@ -94,17 +210,17 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/download-artifact@v4
         with:
-          name: windows-binary
+          name: windows-release
           path: dist
-      - name: Update version, URL, and SHA256
+      - name: Update manifest with verified artifact SHA-256
         run: |
           VERSION="${RELEASE_TAG#v}"
-          SHA256="$(sha256sum dist/mcp-mt5-mcp-quant-windows-x64.tar.gz | awk '{print $1}')"
+          SHA256="$(sha256sum dist/mt5-mcp-quant-windows-x64.mcpb | awk '{print $1}')"
           VERSION="$VERSION" SHA256="$SHA256" python3 - <<'PY'
           import json, os
 
-          with open('server.json', encoding='utf-8') as f:
-              data = json.load(f)
+          with open('server.json', encoding='utf-8') as source:
+              data = json.load(source)
           version = os.environ['VERSION']
           sha = os.environ['SHA256']
           data['version'] = version
@@ -112,14 +228,15 @@ jobs:
               package['version'] = version
               package['fileSha256'] = sha
               package['identifier'] = (
-                  f'https://github.com/severus-sys/mt5-mcp-quant/releases/download/'
-                  f'v{version}/mcp-mt5-mcp-quant-windows-x64.tar.gz'
+                  'https://github.com/severus-sys/mt5-mcp-quant/releases/download/'
+                  f'v{version}/mt5-mcp-quant-windows-x64.mcpb'
               )
-          with open('server.json', 'w', encoding='utf-8') as f:
-              json.dump(data, f, indent=2)
-              f.write('\n')
+          with open('server.json', 'w', encoding='utf-8') as target:
+              json.dump(data, target, indent=2)
+              target.write('\n')
           PY
-      - name: Commit manifest
+          test "$(sha256sum dist/mt5-mcp-quant-windows-x64.mcpb | awk '{print $1}')" = "$SHA256"
+      - name: Commit verified manifest
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
@@ -137,11 +254,9 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: main
-
       - name: Install MCP Registry publisher
         run: |
-          URL=$(curl -sf \
-            -H "Accept: application/vnd.github+json" \
+          URL=$(curl -sf -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/modelcontextprotocol/registry/releases/latest" \
             | python3 -c "
           import json, sys
@@ -151,10 +266,8 @@ jobs:
                         and item['name'].endswith('.tar.gz')
                         and 'sbom' not in item['name']
                         and 'sigstore' not in item['name']), None)
-          if not asset:
-              sys.exit(1)
-          print(asset['browser_download_url'])
-          ")
+          if not asset: sys.exit(1)
+          print(asset['browser_download_url'])")
           curl -fsSL -o mcp-publisher.tar.gz "$URL"
           tar -xzf mcp-publisher.tar.gz
           BINARY=$(find . -maxdepth 3 -name mcp-publisher -type f | head -1)
@@ -162,23 +275,17 @@ jobs:
           chmod +x "$BINARY"
           sudo mv "$BINARY" /usr/local/bin/mcp-publisher
           mcp-publisher --version
-
-      - name: Validate Windows package manifest
+      - name: Validate and publish MCP Registry manifest
         run: |
           python3 - <<'PY'
           import json, re
-
-          with open('server.json', encoding='utf-8') as f:
-              data = json.load(f)
-          packages = data.get('packages', [])
-          assert packages, 'server.json has no packages'
-          for package in packages:
+          with open('server.json', encoding='utf-8') as source:
+              data = json.load(source)
+          assert data['version'] == '${{ github.event.inputs.version || github.ref_name }}'.lstrip('v')
+          for package in data.get('packages', []):
               assert re.fullmatch(r'[a-f0-9]{64}', package.get('fileSha256', ''))
-              assert 'windows-x64.tar.gz' in package.get('identifier', '')
+              assert package.get('identifier', '').endswith('windows-x64.mcpb')
           PY
-
-      - name: Publish to MCP Registry
-        run: |
           mcp-publisher login github-oidc
           mcp-publisher publish
 
@@ -188,8 +295,7 @@ jobs:
     env:
       RELEASE_TAG: ${{ github.event.inputs.version || github.ref_name }}
     steps:
-      - name: Summary
-        run: |
+      - run: |
           echo "Windows release ${RELEASE_TAG} completed"
-          echo "Artifact: mcp-mt5-mcp-quant-windows-x64.tar.gz"
+          echo "Artifacts: mcp-mt5-mcp-quant-windows-x64.tar.gz and mt5-mcp-quant-windows-x64.mcpb"
           echo "MCP Registry: io.github.severus-sys/mt5-mcp-quant"

@@ -1,5 +1,6 @@
 use crate::models::Config;
 use crate::storage::ReportDb;
+use crate::tools::handlers::symbols::resolve_tester_symbol;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::fs;
@@ -108,7 +109,7 @@ fn safe_output_path(user_path: &str, allowed_base: &Path) -> Result<PathBuf> {
 
 /// Check if symbol has sufficient data for date range
 pub async fn handle_check_symbol_data_status(config: &Config, args: &Value) -> Result<Value> {
-    let symbol = args
+    let requested_symbol = args
         .get("symbol")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("symbol is required"))?;
@@ -129,23 +130,21 @@ pub async fn handle_check_symbol_data_status(config: &Config, args: &Value) -> R
         .as_ref()
         .map(|a| a.server.as_str())
         .unwrap_or("");
+    let login = current_account
+        .as_ref()
+        .map(|a| a.login.as_str())
+        .unwrap_or("unknown");
 
-    // Check if symbol exists in available symbols
     let available_symbols = config.discover_symbols_for_active_account();
-    let symbol_available = available_symbols.contains(&symbol.to_string());
-
-    if !symbol_available {
-        return Ok(json!({
-            "content": [{ "type": "text", "text": json!({
-                "symbol": symbol,
-                "has_sufficient_data": false,
-                "error": format!("Symbol '{}' not available for server '{}'", symbol, server),
-                "available_symbols": available_symbols,
-                "suggestion": "Use get_active_account to see available symbols for this account"
-            }).to_string() }],
-            "isError": false
-        }));
-    }
+    let operational_symbol =
+        match resolve_tester_symbol(config, requested_symbol, &available_symbols, server, login)
+            .await
+        {
+            Ok(symbol) => symbol,
+            Err(response) => return Ok(response),
+        };
+    let symbol = operational_symbol.resolved;
+    let symbol_resolution = operational_symbol.resolution;
 
     // Try to find hcc files to determine actual data range
     let mt5_dir = config.mt5_dir();
@@ -154,13 +153,18 @@ pub async fn handle_check_symbol_data_status(config: &Config, args: &Value) -> R
     let mut bars_count = 0;
 
     if let Some(mt5_path) = mt5_dir {
-        let bases_dir = mt5_path.join("Bases");
+        let tester_bases = mt5_path.join("Tester").join("bases");
+        let bases_dir = if tester_bases.is_dir() {
+            tester_bases
+        } else {
+            mt5_path.join("Bases")
+        };
         if bases_dir.exists() {
             // Look through servers for this symbol
             for server_entry in fs::read_dir(&bases_dir)?.flatten() {
                 let server_name = server_entry.file_name().to_string_lossy().to_string();
                 if server.is_empty() || server_name == server {
-                    let symbol_dir = server_entry.path().join("history").join(symbol);
+                    let symbol_dir = server_entry.path().join("history").join(&symbol);
                     if symbol_dir.exists() {
                         // Count hcc files and get date range
                         for entry in fs::read_dir(&symbol_dir)?.flatten() {
@@ -233,7 +237,10 @@ pub async fn handle_check_symbol_data_status(config: &Config, args: &Value) -> R
 
     Ok(json!({
         "content": [{ "type": "text", "text": json!({
-            "symbol": symbol,
+            "symbol": &symbol,
+            "requested_symbol": requested_symbol,
+            "resolved_symbol": &symbol,
+            "symbol_resolution": symbol_resolution,
             "server": server,
             "has_sufficient_data": has_sufficient && bars_count > 0,
             "requested_range": {

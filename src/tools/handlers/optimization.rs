@@ -1,5 +1,6 @@
 use crate::models::Config;
 use crate::optimization::{OptimizationParams, OptimizationParser, OptimizationRunner};
+use crate::tools::handlers::symbols::resolve_tester_symbol;
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::fs;
@@ -25,14 +26,40 @@ pub async fn handle_run_optimization(config: &Config, args: &Value) -> Result<Va
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("to_date is required"))?;
 
+    let requested_symbol = args
+        .get("symbol")
+        .and_then(|value| value.as_str())
+        .unwrap_or("XAUUSD")
+        .trim();
+    let account = config.current_account();
+    let active_server = account
+        .as_ref()
+        .map(|value| value.server.as_str())
+        .unwrap_or("unknown");
+    let active_login = account
+        .as_ref()
+        .map(|value| value.login.as_str())
+        .unwrap_or("unknown");
+    let available_symbols = config.discover_symbols_for_active_account();
+    let symbol = match resolve_tester_symbol(
+        config,
+        requested_symbol,
+        &available_symbols,
+        active_server,
+        active_login,
+    )
+    .await
+    {
+        Ok(symbol) => symbol,
+        Err(response) => return Ok(response),
+    };
+    let resolved_symbol = symbol.resolved.clone();
+    let symbol_resolution = symbol.resolution;
+
     let params = OptimizationParams {
         expert: expert.to_string(),
         set_file: set_file.to_string(),
-        symbol: args
-            .get("symbol")
-            .and_then(|v| v.as_str())
-            .unwrap_or("XAUUSD")
-            .to_string(),
+        symbol: resolved_symbol.clone(),
         from_date: from_date.to_string(),
         to_date: to_date.to_string(),
         deposit: args
@@ -66,6 +93,9 @@ pub async fn handle_run_optimization(config: &Config, args: &Value) -> Result<Va
             "log_file": result.log_file.to_string_lossy(),
             "combinations": result.combinations,
             "message": result.message,
+            "requested_symbol": requested_symbol,
+            "resolved_symbol": resolved_symbol,
+            "symbol_resolution": symbol_resolution,
         }).to_string() }],
         "isError": false
     }))

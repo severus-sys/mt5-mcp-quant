@@ -1,6 +1,6 @@
 # MT5-MCP-Quant
 
-**Native Windows MCP server for MetaTrader 5 strategy development.** Compile, backtest, analyze, optimize, debug, and manage MQL5 Expert Advisors through 92 MCP tools—without Wine, WSL, or GUI automation.
+**Native Windows MCP server for MetaTrader 5 strategy development.** Compile, backtest, analyze, optimize, debug, manage Market Watch, and build static economic-calendar datasets through 96 MCP tools—without Wine, WSL, or runtime GUI automation.
 
 The repository, Rust crate, executable, MCP registration examples, and Agent Skill identifiers all use the `mt5-mcp-quant` / `mt5_mcp_quant` project identity.
 
@@ -49,11 +49,20 @@ In short: **the runtime needs an executable, but the user should not have to man
 - For a pre-built release: no Rust or Visual Studio installation is required
 - For source builds only: [Rust stable](https://rust-lang.org/tools/install/) and Visual Studio’s [Desktop development with C++](https://learn.microsoft.com/en-us/visualstudio/install/workload-component-id-vs-build-tools?view=visualstudio) workload
 
+### Release formats
+
+Each Windows release publishes two equivalent, checksummed artifacts:
+
+- `mt5-mcp-quant-windows-x64.mcpb` is the installable Windows MCP Bundle referenced by the MCP Registry.
+- `mcp-mt5-mcp-quant-windows-x64.tar.gz` is the portable archive for agents and manual installation.
+
+Both contain the binary, configuration example, documentation, PowerShell installers, all ten MT5 skills, auditable MQL sources, README, changelog, and license. crates.io publishing is intentionally out of scope.
+
 ### Agent-managed installation
 
 Give this prompt to Codex, Claude Code, OpenCode, or Hermes from the repository directory:
 
-> Install and configure MT5-MCP-Quant on this Windows computer. Prefer the official pre-built Windows x64 release; build from source only when needed. Detect MT5 with `scripts/setup.ps1`, register the server as `mt5_mcp_quant` over stdio, install the Agent Skills for this client, and verify that `healthcheck` works and exactly 92 tools are available. Do not ask me to launch the binary manually.
+> Install and configure MT5-MCP-Quant on this Windows computer. Prefer the official pre-built Windows x64 release; build from source only when needed. Detect MT5 with `scripts/setup.ps1`, register the server as `mt5_mcp_quant` over stdio, install the Agent Skills for this client, and verify that `healthcheck` works and exactly 96 tools are available. Do not ask me to launch the binary manually.
 
 The agent should complete the whole one-time setup:
 
@@ -61,13 +70,14 @@ The agent should complete the whole one-time setup:
 2. Run `powershell -ExecutionPolicy Bypass -File scripts\setup.ps1` to detect the MT5 program and data directories.
 3. Register the runtime command and `--stdio` in the client's MCP configuration.
 4. Install the router and workflow skills with `scripts\install-agent-skills.ps1`.
-5. Ask for one client restart, then confirm MT5 readiness and the exact 92-tool inventory.
+5. Ask for one client restart, then confirm MT5 readiness and the exact 96-tool inventory.
+6. For Market Watch or calendar work, compile the embedded `MT5McpQuantBridge` Service and ask the user to start it once from MT5 Navigator → Services → MT5-MCP-Quant.
 
 The stored binary path is an internal runtime setting after step 3. Normal users should not need to remember, open, or pass that path in prompts.
 
 ### Install Agent Skills
 
-Install the router and eight workflow skills for Codex, Claude Code, OpenCode, and Hermes:
+Install the router and nine workflow skills for Codex, Claude Code, OpenCode, and Hermes:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\install-agent-skills.ps1 -Client all
@@ -75,7 +85,7 @@ powershell -ExecutionPolicy Bypass -File scripts\install-agent-skills.ps1 -Clien
 
 Users can then write a vague prompt such as “MT5 MCP'yi kullan ve EA'me bak.” The router performs safe discovery and selects the appropriate workflow without requiring a tool name. See [Agent Skills](docs/AGENT_SKILLS.md).
 
-The router starts with read-only orientation checks: MCP health, active account, available EAs, and the latest report. It then chooses setup, MQL development, set-file management, backtesting, optimization, reporting, analytics, or recovery. When two materially different goals remain possible, it asks one outcome-level question instead of asking the user to choose an MCP tool.
+The router starts with read-only orientation checks: MCP health, active account, available EAs, and the latest report. It then chooses setup, MQL development, set-file management, backtesting, optimization, calendar data, reporting, analytics, or recovery. When two materially different goals remain possible, it asks one outcome-level question instead of asking the user to choose an MCP tool.
 
 ### First Backtest
 
@@ -85,7 +95,7 @@ Run a backtest on MyEA from 2025.01.01 to 2025.03.31
 
 The AI runs the full pipeline: compile → clean cache → backtest → extract → analyze.
 
-## MCP Tools (92)
+## MCP Tools (96)
 
 ### Core workflow
 
@@ -106,7 +116,18 @@ The AI runs the full pipeline: compile → clean cache → backtest → extract 
 | `list_indicators` | List all indicators in MQL5/Indicators directory |
 | `list_scripts` | List all scripts in MQL5/Scripts directory |
 | `healthcheck` | Quick server health check |
-| `list_symbols` | List all available symbols in MT5 terminal |
+| `list_symbols` | List symbols with local Strategy Tester history |
+
+### Market Watch and economic calendar
+
+| Tool | Description |
+|------|-----|
+| `ensure_market_watch_symbol` | Resolve broker suffix/prefix aliases without guessing, select the exact symbol, and verify Market Watch visibility |
+| `prepare_calendar_export` | Create an idempotent asynchronous export job against the active broker's live MT5 calendar |
+| `inspect_calendar_export` | Poll job state, progress, row count, coverage, validation, and machine-readable errors |
+| `prepare_calendar_backtest_dataset` | Publish a validated CSV v1 dataset and checksum manifest for Strategy Tester EAs |
+
+The embedded `MT5McpQuantBridge` MQL5 Service is optional for the original 92 tools and required only for broker-catalog/Market Watch and live-calendar operations. Start it once from MT5 Navigator; unlike the earlier proposal, calendar export does not require running a new Script for every export.
 
 ### Granular Analytics (individual analysis)
 

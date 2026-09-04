@@ -199,6 +199,7 @@ impl McpServer {
                             },
                         },
                         "serverInfo": server_info,
+                        "instructions": "Start with healthcheck/verify_setup when intent is vague. list_symbols reports local Strategy Tester history, not the broker catalog or Market Watch. For live symbols use ensure_market_watch_symbol, which resolves aliases safely and selects the exact broker symbol. For economic-calendar tester data use prepare_calendar_export, poll inspect_calendar_export, then call prepare_calendar_backtest_dataset. Prefer read-only orientation before destructive cleanup or process termination.",
                     })),
                     error: None,
                 }

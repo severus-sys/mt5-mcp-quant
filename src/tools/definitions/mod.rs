@@ -3,7 +3,9 @@ use serde_json::Value;
 pub mod analytics;
 pub mod backtest;
 pub mod baseline;
+pub mod calendar;
 pub mod experts;
+pub mod market_watch;
 pub mod optimization;
 pub mod reports;
 pub mod setfiles;
@@ -67,6 +69,12 @@ pub fn get_tools_list() -> Value {
         system::tool_get_active_account(),
         system::tool_check_update(),
         system::tool_update(),
+        // Broker catalog / Market Watch
+        market_watch::tool_ensure_market_watch_symbol(),
+        // Economic calendar export / tester datasets
+        calendar::tool_prepare_calendar_export(),
+        calendar::tool_inspect_calendar_export(),
+        calendar::tool_prepare_calendar_backtest_dataset(),
         // Utility (8 tools)
         utility::tool_check_symbol_data_status(),
         utility::tool_get_backtest_history(),

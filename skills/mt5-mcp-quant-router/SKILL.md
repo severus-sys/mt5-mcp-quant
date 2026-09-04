@@ -1,6 +1,6 @@
 ---
 name: mt5-mcp-quant-router
-description: Route vague or underspecified MetaTrader 5 and MT5-MCP-Quant requests. Use when the user asks to use the MT5 MCP, mentions an EA without naming an operation, does not know which feature to choose, or mixes setup, backtest, optimization, report, analytics, and debugging goals.
+description: Route vague or underspecified MetaTrader 5 and MT5-MCP-Quant requests. Use when the user asks to use the MT5 MCP, mentions an EA without naming an operation, does not know which feature to choose, or mixes setup, backtest, optimization, calendar, report, analytics, and debugging goals.
 ---
 
 # MT5-MCP-Quant Router
@@ -17,6 +17,7 @@ Turn an unclear MT5 request into safe progress without asking the user to choose
 - Find, compare, tag, export, archive, or promote results → apply `mt5-mcp-quant-reports`.
 - Explain profit, losses, drawdown, timing, layers, costs, or deals → apply `mt5-mcp-quant-analytics`.
 - Investigate errors, crashes, logs, stuck processes, or missing output → apply `mt5-mcp-quant-debug-recovery`.
+- Export economic-calendar history, build a news filter, prepare static tester data, or handle tester error 4014 → apply `mt5-mcp-quant-calendar-data`.
 
 ## Vague-request default
 
@@ -36,6 +37,7 @@ If one route is clearly useful, continue with its safe first action. If material
 - When the user says “iyileştir,” “en iyi ayar,” or “optimize,” route to optimization; require a valid swept `.set` file before launch.
 - When the user asks “neden kaybetti?” or “sonuç nasıl?”, analyze the latest matching report unless they identify another.
 - When the user reports a failure, inspect status and logs before process termination or cleanup.
+- When the user mentions calendar/news data without an implementation method, prefer the persistent Service export and static provider workflow over a one-off Script.
 
 ## Invariants
 

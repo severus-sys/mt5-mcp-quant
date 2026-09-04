@@ -10,6 +10,15 @@ pub struct MqlCompiler {
     config: Config,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum MqlTarget {
+    Expert,
+    Indicator,
+    Script,
+    Service,
+}
+
 pub struct CompileResult {
     pub success: bool,
     pub ex5_path: Option<PathBuf>,
@@ -32,6 +41,125 @@ impl MqlCompiler {
     pub async fn compile(&self, source_path: &str) -> Result<CompileResult> {
         self.compile_with_timeout(source_path, Duration::from_secs(120))
             .await
+    }
+
+    /// Deploy and compile an MQL program into its native MT5 target directory.
+    /// The legacy `compile` path remains unchanged for Expert projects.
+    pub async fn compile_target(
+        &self,
+        source_path: &Path,
+        target: MqlTarget,
+        namespace: &str,
+        timeout: Duration,
+    ) -> Result<CompileResult> {
+        if !source_path.is_file() {
+            return Err(anyhow!("Source file not found: {}", source_path.display()));
+        }
+        if namespace.is_empty()
+            || !namespace
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || "-_".contains(character))
+        {
+            return Err(anyhow!("Invalid MQL namespace: {}", namespace));
+        }
+
+        let root = self.target_root(target)?;
+        let destination_dir = root.join(namespace);
+        fs::create_dir_all(&destination_dir)?;
+        let file_name = source_path
+            .file_name()
+            .ok_or_else(|| anyhow!("Invalid MQL source file name"))?;
+        let deployed_source = destination_dir.join(file_name);
+        Self::copy_atomic(source_path, &deployed_source)?;
+
+        let metaeditor = self
+            .config
+            .metaeditor_executable()
+            .ok_or_else(|| anyhow!("terminal_dir not configured"))?;
+        if !metaeditor.is_file() {
+            return Err(anyhow!(
+                "metaeditor64.exe not found at: {}",
+                metaeditor.display()
+            ));
+        }
+        self.run_metaeditor_with_timeout(&metaeditor, &deployed_source, timeout)
+            .await?;
+
+        let log_text = Self::read_log(&deployed_source.with_extension("log"));
+        let errors = Self::compile_messages(&log_text, "error");
+        let warnings = Self::compile_messages(&log_text, "warning");
+        let ex5_path = deployed_source.with_extension("ex5");
+        let binary_size = fs::metadata(&ex5_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let success = ex5_path.is_file() && errors.is_empty();
+
+        Ok(CompileResult {
+            success,
+            ex5_path: success.then_some(ex5_path),
+            errors: if !success && errors.is_empty() {
+                vec![format!(
+                    "Compilation did not produce an EX5 file. Log: {}",
+                    log_text
+                )]
+            } else {
+                errors
+            },
+            warnings,
+            binary_size,
+            files_synced: 1,
+        })
+    }
+
+    /// Deploy an Include file. Includes are source-only and are not compiled.
+    pub fn deploy_include(&self, file_name: &str, contents: &[u8]) -> Result<PathBuf> {
+        if file_name.is_empty()
+            || Path::new(file_name)
+                .file_name()
+                .and_then(|name| name.to_str())
+                != Some(file_name)
+            || !file_name.ends_with(".mqh")
+        {
+            return Err(anyhow!("Invalid Include file name: {}", file_name));
+        }
+        let destination_dir = self.config.include_dir().join("MT5-MCP-Quant");
+        fs::create_dir_all(&destination_dir)?;
+        let destination = destination_dir.join(file_name);
+        Self::write_atomic(&destination, contents)?;
+        Ok(destination)
+    }
+
+    fn target_root(&self, target: MqlTarget) -> Result<PathBuf> {
+        let configured = match target {
+            MqlTarget::Expert => self.config.experts_dir.as_ref().map(PathBuf::from),
+            MqlTarget::Indicator => self.config.indicators_dir.as_ref().map(PathBuf::from),
+            MqlTarget::Script => self.config.scripts_dir.as_ref().map(PathBuf::from),
+            MqlTarget::Service => Some(self.config.services_dir()),
+        };
+        configured.ok_or_else(|| anyhow!("{:?} target directory not configured", target))
+    }
+
+    fn copy_atomic(source: &Path, destination: &Path) -> Result<()> {
+        let bytes = fs::read(source)?;
+        Self::write_atomic(destination, &bytes)
+    }
+
+    fn write_atomic(destination: &Path, contents: &[u8]) -> Result<()> {
+        crate::utils::atomic_write(destination, contents)
+    }
+
+    fn compile_messages(log_text: &str, kind: &str) -> Vec<String> {
+        log_text
+            .lines()
+            .filter(|line| {
+                let lower = line.to_ascii_lowercase();
+                lower.contains(&format!(": {}:", kind))
+                    || (lower.contains(kind)
+                        && !lower.contains(&format!("0 {}", kind))
+                        && !lower.contains("information"))
+            })
+            .map(str::to_string)
+            .collect()
     }
 
     pub async fn compile_with_timeout(

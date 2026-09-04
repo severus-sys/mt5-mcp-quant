@@ -1,11 +1,11 @@
 # MT5-MCP-Quant Agent Skills
 
-MT5-MCP-Quant ships nine portable Agent Skills:
+MT5-MCP-Quant ships ten portable Agent Skills:
 
 - `mt5-mcp-quant-router` handles vague requests and chooses a workflow.
-- Eight domain skills cover setup, MQL development, set files, backtesting, optimization, reports, analytics, and recovery.
+- Nine domain skills cover setup, MQL development, set files, backtesting, optimization, calendar data, reports, analytics, and recovery.
 
-The skills teach workflows; the MCP server still exposes all 92 tools.
+The skills teach workflows; the MCP server still exposes all 96 tools. Skills are grouped by workflow rather than one skill per MCP tool.
 
 ## Install
 
@@ -26,7 +26,7 @@ Use `-Force` to update an existing installation.
 
 The canonical source remains the repository `skills/` directory. Hermes can also consume that directory as a Skills Hub tap, and Claude/Codex plugins can package it as their plugin `skills/` directory.
 
-Restart the client or reload its skill catalog after installation. The MCP server should be registered as `mt5_mcp_quant`; a different local server name is acceptable when it exposes the same 92 MT5-MCP-Quant tools.
+Restart the client or reload its skill catalog after installation. The MCP server should be registered as `mt5_mcp_quant`; a different local server name is acceptable when it exposes the same 96 MT5-MCP-Quant tools.
 
 ## Vague prompts
 
@@ -43,7 +43,7 @@ Default behavior:
 1. Check MCP/MT5 health and the active account.
 2. Discover available EAs.
 3. Inspect the latest report.
-4. Infer whether development, backtesting, optimization, reporting, analytics, or recovery is the useful route.
+4. Infer whether development, backtesting, optimization, calendar data, reporting, analytics, or recovery is the useful route.
 5. Continue with the safe first action, or ask one outcome-level question when two materially different routes remain.
 
 More specific prompts route directly:
@@ -53,6 +53,7 @@ More specific prompts route directly:
 - “En iyi ayarları bul” → optimization
 - “Neden zarar etti?” → analytics
 - “MT5 takıldı” → debug and recovery
+- “2017–2026 GBP/USD yüksek önem haberlerini tester’a ver” → calendar data
 
 ## Validate
 

@@ -1,3 +1,4 @@
+use crate::bridge::BridgeClient;
 use crate::models::Config;
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -450,6 +451,30 @@ pub async fn handle_verify_setup(config: &Config) -> Result<Value> {
     checks.insert("indicators_dir".into(), check(&config.indicators_dir, true));
     checks.insert("scripts_dir".into(), check(&config.scripts_dir, true));
     checks.insert(
+        "services_dir".into(),
+        json!({
+            "ok": config.services_dir().is_dir(),
+            "detail": config.services_dir().to_string_lossy(),
+            "optional": true,
+        }),
+    );
+    checks.insert(
+        "include_dir".into(),
+        json!({
+            "ok": config.include_dir().is_dir(),
+            "detail": config.include_dir().to_string_lossy(),
+            "optional": true,
+        }),
+    );
+    checks.insert(
+        "terminal_common_data_dir".into(),
+        json!({
+            "ok": config.terminal_common_data_dir().map(|path| path.is_dir()).unwrap_or(false),
+            "detail": config.terminal_common_data_dir().map(|path| path.to_string_lossy().into_owned()),
+            "optional": true,
+        }),
+    );
+    checks.insert(
         "tester_profiles_dir".into(),
         check(&config.tester_profiles_dir, true),
     );
@@ -474,11 +499,21 @@ pub async fn handle_verify_setup(config: &Config) -> Result<Value> {
         format!("Fix missing paths in {}", config_path.display())
     };
 
+    let mql_bridge = BridgeClient::new(config)
+        .map(|bridge| json!(bridge.health()))
+        .unwrap_or_else(|error| {
+            json!({
+                "state": "not_installed",
+                "hint": error.to_string(),
+            })
+        });
+
     Ok(json!({
         "content": [{ "type": "text", "text": json!({
             "all_ok": all_ok,
             "config_path": config_path.to_string_lossy(),
             "checks": checks,
+            "mql_bridge": mql_bridge,
             "hint": hint,
         }).to_string() }],
         "isError": false

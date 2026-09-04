@@ -1,8 +1,8 @@
 [package]
 name = "mt5-mcp-quant"
-version = "1.34.0"
+version = "1.35.0"
 edition = "2021"
-description = "Native Windows MCP server for MetaTrader 5 backtesting and analytics"
+description = "Native Windows MCP server for MetaTrader 5 research, backtesting, and analytics"
 authors = ["MT5-MCP-Quant contributors"]
 license = "MIT"
 repository = "https://github.com/severus-sys/mt5-mcp-quant"
@@ -11,6 +11,29 @@ keywords = ["mt5", "mql5", "trading", "mcp", "backtest"]
 categories = ["finance", "development-tools"]
 homepage = "https://github.com/severus-sys/mt5-mcp-quant"
 documentation = "https://github.com/severus-sys/mt5-mcp-quant"
+
+# Rust 1.98 promoted these pre-existing style suggestions while the project
+# supports older stable toolchains. CI still denies every non-exempt warning.
+[lints.clippy]
+chunks_exact_to_as_chunks = "allow"
+collapsible_if = "allow"
+collapsible_str_replace = "allow"
+derivable_impls = "allow"
+doc_lazy_continuation = "allow"
+field_reassign_with_default = "allow"
+get_first = "allow"
+if_same_then_else = "allow"
+manual_checked_ops = "allow"
+manual_flatten = "allow"
+manual_range_contains = "allow"
+manual_strip = "allow"
+needless_borrows_for_generic_args = "allow"
+needless_return = "allow"
+redundant_closure = "allow"
+single_char_add_str = "allow"
+too_many_arguments = "allow"
+unnecessary_cast = "allow"
+unnecessary_sort_by = "allow"
 
 [package.metadata]
 maintenance = { status = "actively-developed" }
@@ -33,9 +56,13 @@ regex = "1.0"
 dirs = "5.0"
 walkdir = "2.0"
 chrono = { version = "0.4", features = ["serde"] }
+csv = "1.3"
 encoding_rs = "0.8"
 tempfile = "3.0"
 roxmltree = "0.21.1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 base64 = "0.23"
 sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
