@@ -224,7 +224,11 @@ impl BridgeClient {
         let updated = fields
             .get("updated_epoch")
             .and_then(|value| value.parse::<u64>().ok());
-        health.heartbeat_age_seconds = updated.map(|value| now_epoch().saturating_sub(value));
+        let now = now_epoch();
+        let heartbeat_is_future = updated
+            .map(|value| value > now.saturating_add(5))
+            .unwrap_or(false);
+        health.heartbeat_age_seconds = updated.map(|value| now.abs_diff(value));
 
         if fields.get("protocol").map(String::as_str) != Some(BRIDGE_PROTOCOL_VERSION)
             || fields.get("service_version").map(String::as_str) != Some(BRIDGE_SERVICE_VERSION)
@@ -245,7 +249,11 @@ impl BridgeClient {
                     "Configured account/server differs from the Service heartbeat.".to_string();
             }
         }
-        if health.state == BridgeHealthState::Ready
+        if health.state == BridgeHealthState::Ready && heartbeat_is_future {
+            health.state = BridgeHealthState::Stale;
+            health.hint = "Heartbeat timestamp is ahead of UTC; reinstall and restart the Service."
+                .to_string();
+        } else if health.state == BridgeHealthState::Ready
             && health.heartbeat_age_seconds.unwrap_or(u64::MAX) > 5
         {
             health.state = BridgeHealthState::Stale;
@@ -566,6 +574,24 @@ mod tests {
         ]);
         fs::write(bridge.root().join("heartbeat.kv"), serialize_fields(&stale)).unwrap();
         assert_eq!(bridge.health().state, BridgeHealthState::Stale);
+
+        let future = BTreeMap::from([
+            ("protocol".into(), BRIDGE_PROTOCOL_VERSION.into()),
+            ("service_version".into(), BRIDGE_SERVICE_VERSION.into()),
+            ("instance_id".into(), bridge.instance_id().into()),
+            (
+                "updated_epoch".into(),
+                now_epoch().saturating_add(3_600).to_string(),
+            ),
+        ]);
+        fs::write(
+            bridge.root().join("heartbeat.kv"),
+            serialize_fields(&future),
+        )
+        .unwrap();
+        let health = bridge.health();
+        assert_eq!(health.state, BridgeHealthState::Stale);
+        assert!(health.hint.contains("ahead of UTC"));
 
         let wrong = BTreeMap::from([
             ("protocol".into(), BRIDGE_PROTOCOL_VERSION.into()),

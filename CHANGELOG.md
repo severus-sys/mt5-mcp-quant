@@ -25,5 +25,6 @@ All notable changes to MT5-MCP-Quant are documented here.
 - Corrected tester history discovery to prefer `Tester/bases` and fall back to `Bases` only when needed.
 - Prevented per-symbol cache cleanup from deleting files when a symbol alias is ambiguous.
 - Added structured requested/resolved symbol context and actionable no-history/no-match failures.
+- Standardized FILE_COMMON protocol timestamps on UTC and reject implausibly future heartbeats, preventing false-ready health and immediately expired requests on non-UTC Windows systems.
 
 [1.35.0]: https://github.com/severus-sys/mt5-mcp-quant/releases/tag/v1.35.0
